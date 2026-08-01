@@ -5,5 +5,7 @@ package-lock.json
 .DS_Store
 Thumbs.db
 
-# Build artifacts: APKs are distributed via GitHub Releases, not committed.
+# Build artifacts: APKs and release packages are distributed via GitHub
+# Releases, not committed to the repo.
 *.apk
+*.zip
