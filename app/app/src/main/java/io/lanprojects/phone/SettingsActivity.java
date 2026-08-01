@@ -65,25 +65,17 @@ public class SettingsActivity extends AppCompatActivity {
 
         findViewById(R.id.btnBack).setOnClickListener(v -> finish());
 
-        TextView versionValue = findViewById(R.id.versionValue);
+        // Version shown at the bottom of the settings page.
+        TextView versionFooter = findViewById(R.id.versionFooter);
         try {
-            versionValue.setText("v" + getPackageManager()
+            versionFooter.setText("lan-projects v" + getPackageManager()
                     .getPackageInfo(getPackageName(), 0).versionName);
         } catch (Exception e) {
-            versionValue.setText("v?");
+            versionFooter.setText("lan-projects v?");
         }
 
-        findViewById(R.id.rowSpeed).setOnClickListener(v ->
-                startActivity(new Intent(this, SpeedTestActivity.class)));
-
-        findViewById(R.id.rowLogs).setOnClickListener(v ->
-                startActivity(new Intent(this, LogViewerActivity.class)));
-
-        findViewById(R.id.rowAbout).setOnClickListener(v -> showAbout());
-
-        findViewById(R.id.rowPrivacy).setOnClickListener(v -> showPrivacy());
-
-        findViewById(R.id.rowGithub).setOnClickListener(v -> {
+        // GitHub icon below the version -> open the repository.
+        findViewById(R.id.githubFooter).setOnClickListener(v -> {
             try {
                 startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(GITHUB_URL)));
             } catch (Exception e) {
@@ -91,24 +83,18 @@ public class SettingsActivity extends AppCompatActivity {
             }
         });
 
-        findViewById(R.id.rowUpdate).setOnClickListener(v -> checkForUpdate());
-    }
+        findViewById(R.id.rowSpeed).setOnClickListener(v ->
+                startActivity(new Intent(this, SpeedTestActivity.class)));
 
-    private void showAbout() {
-        String version = "?";
-        try {
-            version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
-        } catch (Exception ignored) {
-        }
-        new AlertDialog.Builder(this)
-                .setTitle("关于 lan-projects")
-                .setMessage("lan-projects v" + version + "\n\n"
-                        + "局域网文件共享 · 端对端加密\n\n"
-                        + "本机做服务器，或连接其他设备，在局域网内高速互传文件，"
-                        + "不消耗互联网流量。\n\n"
-                        + "开源项目：github.com/jidanbings/lan-projects")
-                .setPositiveButton("知道了", null)
-                .show();
+        findViewById(R.id.rowLogs).setOnClickListener(v ->
+                startActivity(new Intent(this, LogViewerActivity.class)));
+
+        findViewById(R.id.rowAbout).setOnClickListener(v ->
+                startActivity(new Intent(this, AboutActivity.class)));
+
+        findViewById(R.id.rowPrivacy).setOnClickListener(v -> showPrivacy());
+
+        findViewById(R.id.rowUpdate).setOnClickListener(v -> checkForUpdate());
     }
 
     private void showPrivacy() {

@@ -52,37 +52,6 @@
             android:orientation="vertical"
             android:padding="16dp">
 
-            <!-- 版本号 -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:paddingTop="14dp"
-                android:paddingBottom="14dp">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="版本号"
-                    android:textColor="#FFFFFF"
-                    android:textSize="15sp" />
-
-                <TextView
-                    android:id="@+id/versionValue"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="…"
-                    android:textColor="#9AA7B0"
-                    android:textSize="15sp" />
-            </LinearLayout>
-
-            <View
-                android:layout_width="match_parent"
-                android:layout_height="1dp"
-                android:background="#26333A" />
-
             <!-- 检查更新 -->
             <LinearLayout
                 android:id="@+id/rowUpdate"
@@ -247,51 +216,30 @@
                 android:layout_height="1dp"
                 android:background="#26333A" />
 
-            <!-- 开源项目 GitHub -->
+            <!-- 底部：版本号 + GitHub 图标 -->
             <LinearLayout
-                android:id="@+id/rowGithub"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:paddingTop="14dp"
-                android:paddingBottom="14dp">
-
-                <ImageView
-                    android:layout_width="28dp"
-                    android:layout_height="28dp"
-                    android:layout_marginEnd="12dp"
-                    android:contentDescription="GitHub"
-                    android:src="@drawable/github_icon" />
-
-                <LinearLayout
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:orientation="vertical">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="开源项目 · GitHub"
-                        android:textColor="#FFFFFF"
-                        android:textSize="15sp" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="2dp"
-                        android:text="github.com/jidanbings/lan-projects"
-                        android:textColor="#8AB4F8"
-                        android:textSize="12sp" />
-                </LinearLayout>
+                android:layout_marginTop="36dp"
+                android:gravity="center"
+                android:orientation="vertical"
+                android:paddingBottom="28dp">
 
                 <TextView
+                    android:id="@+id/versionFooter"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="›"
-                    android:textColor="#546E7A"
-                    android:textSize="20sp" />
+                    android:text="…"
+                    android:textColor="#6B7B84"
+                    android:textSize="12sp" />
+
+                <ImageView
+                    android:id="@+id/githubFooter"
+                    android:layout_width="30dp"
+                    android:layout_height="30dp"
+                    android:layout_marginTop="10dp"
+                    android:contentDescription="GitHub"
+                    android:src="@drawable/github_icon" />
             </LinearLayout>
         </LinearLayout>
     </ScrollView>

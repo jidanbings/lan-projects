@@ -56,6 +56,12 @@
             android:exported="false"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density" />
 
+        <!-- About page: renders the live README (markdown) from GitHub. -->
+        <activity
+            android:name=".AboutActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density" />
+
         <!-- Speed test (self benchmark of the phone's data-processing speed). -->
         <activity
             android:name=".SpeedTestActivity"
