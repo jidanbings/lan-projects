@@ -6,9 +6,10 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.FileReader;
-import java.io.RandomAccessFile;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -22,13 +23,15 @@ import java.util.Locale;
  * process share the same files dir, so both can append here.
  *
  * Lines are short and each write is a single append, so cross-process
- * interleaving is harmless for diagnostics. The file is capped so it cannot
- * grow forever.
+ * interleaving is harmless for diagnostics. Only the newest MAX_LINES lines
+ * are kept - older lines are dropped on the next append, so the file can
+ * never grow without bound.
  */
 public class ServerLog {
 
     private static final String FILE = "server.log";
-    private static final int MAX_BYTES = 200 * 1024; // ~200 KB
+    /** Keep only the newest 100 lines; anything older is dropped on append. */
+    private static final int MAX_LINES = 100;
 
     private ServerLog() {
     }
@@ -73,18 +76,27 @@ public class ServerLog {
         }
     }
 
-    /** Keep only the last MAX_BYTES, dropping the oldest chunk. */
+    /**
+     * Keep only the newest MAX_LINES lines, dropping the oldest. Writes are
+     * rare (lifecycle events, not per-request), so reading the small file here
+     * is cheap. Two processes can append to the same file; if their trims
+     * interleave a line may occasionally be lost - acceptable for a diagnostic
+     * log.
+     */
     private static void trim(File f) {
-        if (f.length() <= MAX_BYTES) return;
-        try (RandomAccessFile raf = new RandomAccessFile(f, "rw")) {
-            long len = raf.length();
-            long skip = len - MAX_BYTES;
-            raf.seek(skip);
-            byte[] buf = new byte[(int) (len - skip)];
-            raf.readFully(buf);
-            raf.setLength(0);
-            raf.seek(0);
-            raf.write(buf);
+        List<String> lines = new ArrayList<>();
+        try (BufferedReader r = new BufferedReader(new FileReader(f))) {
+            String line;
+            while ((line = r.readLine()) != null) lines.add(line);
+        } catch (Exception e) {
+            return;
+        }
+        if (lines.size() <= MAX_LINES) return;
+        int from = lines.size() - MAX_LINES;
+        try (FileOutputStream os = new FileOutputStream(f, false)) {
+            for (int i = from; i < lines.size(); i++) {
+                os.write((lines.get(i) + "\n").getBytes("UTF-8"));
+            }
         } catch (Exception ignored) {
         }
     }

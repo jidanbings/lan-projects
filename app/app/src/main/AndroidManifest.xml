@@ -62,6 +62,13 @@
             android:exported="false"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density" />
 
+        <!-- Privacy + SDK page: bundled, offline, detailed. Opened from the
+             settings screen; never exported to other apps. -->
+        <activity
+            android:name=".PrivacyActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density" />
+
         <!-- Speed test (self benchmark of the phone's data-processing speed). -->
         <activity
             android:name=".SpeedTestActivity"

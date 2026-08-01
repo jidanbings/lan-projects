@@ -9,11 +9,21 @@ import {hasher, randomizer} from "./helper.js";
 // (HOME is set to the app's files dir by NodeService). Used to diagnose the
 // "很多设备" bug: whether a fresh server really has an empty room, and whether
 // the same device connects more than once.
+// Keep only the newest MAX_LOG_LINES lines, matching the Java-side cap in
+// ServerLog.java (the two processes share server.log). Append first so a
+// message is never lost before the trim runs.
+const MAX_LOG_LINES = 100;
 function dlog(msg) {
     try {
         if (!process.env.HOME) return;
-        fs.appendFileSync(process.env.HOME + '/server.log',
+        const file = process.env.HOME + '/server.log';
+        fs.appendFileSync(file,
             new Date().toISOString().replace('T', ' ').slice(0, 19) + '  [node]  ' + msg + '\n');
+        const text = fs.readFileSync(file, 'utf8').replace(/\n$/, '');
+        const lines = text.split('\n');
+        if (lines.length > MAX_LOG_LINES) {
+            fs.writeFileSync(file, lines.slice(lines.length - MAX_LOG_LINES).join('\n') + '\n');
+        }
     } catch (e) {
         // logging must never break the server
     }
@@ -57,8 +67,9 @@ export default class LanProjectsWsServer {
         // fired pagehide). Without this a closed peer stayed in the room until
         // the keep-alive timed out, so reconnecting from the same device kept
         // adding a fresh entry and the room filled up with stale devices.
+        // (No SOCKET-CLOSE log here: _disconnect always logs DISCONNECT, so
+        // logging both just doubled the noise for the same event.)
         peer.socket.on('close', () => {
-            dlog('SOCKET-CLOSE peer=' + peer.id + ' ip=' + peer.ip);
             this._disconnect(peer);
         });
 

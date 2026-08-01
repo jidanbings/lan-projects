@@ -160,8 +160,7 @@ public class SaveFileServer {
                 // ---- move to Downloads ----
                 boolean ok = moveToDownloads(tmp, name, mime);
                 if (ok) {
-                    ServerLog.log(context, "下载完成: " + name + " (" + written + " 字节) 缓存="
-                            + (dirSize(context.getCacheDir()) / 1024 / 1024) + "MB");
+                    ServerLog.log(context, "下载完成: " + name + " (" + written + " 字节)");
                     respond(out, 200, "OK");
                 } else {
                     ServerLog.log(context, "✗ 保存到下载目录失败: " + name);
@@ -170,40 +169,13 @@ public class SaveFileServer {
             } catch (Exception e) {
                 ServerLog.log(context, "保存服务器错误: " + e);
             } finally {
-                boolean del = tmp != null && tmp.exists() && tmp.delete();
-                ServerLog.log(context, "保存后缓存=" + (dirSize(context.getCacheDir()) / 1024 / 1024)
-                        + "MB 数据目录=" + (dirSize(context.getDataDir()) / 1024 / 1024)
-                        + "MB 临时文件删除=" + del
-                        + " saving残留=" + countStaleTempFiles());
-                // Diagnose what exactly is eating the app data dir.
-                listLargeFiles(context.getDataDir(), 10, "data");
-                listLargeFiles(context.getCacheDir(), 10, "cache");
+                // Remove the temp file on every path (success / failure /
+                // exception) so an interrupted save never leaves a big file in
+                // the cache dir.
+                if (tmp != null && tmp.exists()) tmp.delete();
             }
         } catch (Exception e) {
             ServerLog.log(context, "保存服务器错误: " + e);
-        }
-    }
-
-    private int countStaleTempFiles() {
-        File[] files = context.getCacheDir().listFiles();
-        if (files == null) return 0;
-        int n = 0;
-        for (File f : files) if (f.isFile() && f.getName().startsWith("saving-")) n++;
-        return n;
-    }
-
-    /** Log any file larger than minMb so we can see what is eating storage. */
-    private void listLargeFiles(File dir, long minMb, String tag) {
-        if (dir == null || !dir.exists()) return;
-        File[] files = dir.listFiles();
-        if (files == null) return;
-        for (File f : files) {
-            if (f.isDirectory()) {
-                listLargeFiles(f, minMb, tag);
-            } else if (f.isFile() && f.length() > minMb * 1024 * 1024) {
-                ServerLog.log(context, "[大文件][" + tag + "] " + f.getAbsolutePath()
-                        + " " + (f.length() / 1024 / 1024) + "MB");
-            }
         }
     }
 
@@ -219,17 +191,6 @@ public class SaveFileServer {
                 }
             }
         }
-    }
-
-    private long dirSize(File dir) {
-        long size = 0;
-        File[] files = dir.listFiles();
-        if (files == null) return 0;
-        for (File f : files) {
-            if (f.isFile()) size += f.length();
-            else if (f.isDirectory()) size += dirSize(f);
-        }
-        return size;
     }
 
     private boolean moveToDownloads(File src, String filename, String mime) {

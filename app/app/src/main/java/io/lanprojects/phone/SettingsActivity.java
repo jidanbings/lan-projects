@@ -92,27 +92,10 @@ public class SettingsActivity extends AppCompatActivity {
         findViewById(R.id.rowAbout).setOnClickListener(v ->
                 startActivity(new Intent(this, AboutActivity.class)));
 
-        findViewById(R.id.rowPrivacy).setOnClickListener(v -> showPrivacy());
+        findViewById(R.id.rowPrivacy).setOnClickListener(v ->
+                startActivity(new Intent(this, PrivacyActivity.class)));
 
         findViewById(R.id.rowUpdate).setOnClickListener(v -> checkForUpdate());
-    }
-
-    private void showPrivacy() {
-        new AlertDialog.Builder(this)
-                .setTitle("隐私与 SDK")
-                .setMessage("【数据是否上传云端】\n"
-                        + "❌ 不会。所有文件传输都在局域网内完成（WebSocket 中继或 WebRTC 直连），"
-                        + "不经过任何云端服务器，也不消耗互联网流量。App 内嵌的服务器只监听本机局域网地址，"
-                        + "代码中没有任何向公网上传数据的请求。\n\n"
-                        + "【使用的 SDK / 组件】\n"
-                        + "· AndroidX AppCompat（界面）\n"
-                        + "· ZXing（二维码扫码 / 生成）\n"
-                        + "· 内置 Node.js 运行时（nodejs-mobile 18.20，仅用于局域网服务器）\n"
-                        + "· npm 包：express、ws、ua-parser-js、unique-names-generator、express-rate-limit 等"
-                        + "（均为服务器依赖，不包含任何统计 / 广告 / 云上报 SDK）\n\n"
-                        + "传输数据均进行端对端加密，未配对者无法解密。")
-                .setPositiveButton("知道了", null)
-                .show();
     }
 
     /** Query GitHub for the latest release and prompt to update if newer. */
