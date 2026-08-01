@@ -111,4 +111,6 @@ dependencies {
     implementation 'androidx.appcompat:appcompat:1.7.0'
     // QR code: scan (camera) + generate the launch screen's connect QR.
     implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
+    // Render the GitHub release notes (markdown) in the update dialog.
+    implementation 'io.noties.markwon:core:4.6.2'
 }

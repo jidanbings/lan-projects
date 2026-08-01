@@ -3,7 +3,9 @@ package io.lanprojects.phone;
 import android.Manifest;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.Signature;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.net.Uri;
@@ -41,6 +43,7 @@ import androidx.core.view.WindowInsetsControllerCompat;
 
 import java.io.File;
 import java.net.Inet4Address;
+import java.security.MessageDigest;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
 import java.util.Collections;
@@ -556,5 +559,27 @@ public class MainActivity extends AppCompatActivity {
         }
         //noinspection ResultOfMethodCallIgnored
         f.delete();
+    }
+
+    /** SHA-256 fingerprint of the official release signing certificate. */
+    private static final String OFFICIAL_SIGNATURE =
+            "EA89B630D74212BC87A1C17FB2E0233DA8A14502E121479EC98FE2071171BCFF";
+
+    /** True if the installed app is signed with the official release key. */
+    public static boolean isOfficialBuild(android.content.Context ctx) {
+        try {
+            PackageInfo info = ctx.getPackageManager().getPackageInfo(
+                    ctx.getPackageName(), PackageManager.GET_SIGNING_CERTIFICATES);
+            Signature[] signers = info.signingInfo.getApkContentsSigners();
+            if (signers == null || signers.length == 0) return false;
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(signers[0].toByteArray());
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) sb.append(String.format("%02X", b));
+            return OFFICIAL_SIGNATURE.equalsIgnoreCase(sb.toString());
+        } catch (Exception e) {
+            // Fail closed: an unknown signature state must not count as official.
+            return false;
+        }
     }
 }

@@ -71,6 +71,12 @@
             android:process=":node"
             android:foregroundServiceType="dataSync" />
 
+        <!-- Foreground download of the update APK (progress / pause / cancel). -->
+        <service
+            android:name=".UpdateDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- Custom WeChat-style scanner: portrait, back button, green viewfinder.
              Launched via ScanOptions.setCaptureActivity(ScanActivity.class). -->
         <activity

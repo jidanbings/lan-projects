@@ -2,9 +2,6 @@ package io.lanprojects.phone;
 
 import android.app.AlertDialog;
 import android.content.Intent;
-import android.content.pm.PackageInfo;
-import android.content.pm.PackageManager;
-import android.content.pm.Signature;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
@@ -28,7 +25,6 @@ import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
 
-import java.security.MessageDigest;
 import java.util.List;
 
 /**
@@ -59,23 +55,13 @@ public class LaunchActivity extends AppCompatActivity {
                 }
             });
 
-    /**
-     * SHA-256 fingerprint of the official release signing certificate (hex,
-     * no colons). A build whose signing cert does not match this is a
-     * repackaged / unofficial build and is refused at startup. Debug builds
-     * skip the check (see BuildConfig.DEBUG in onCreate), so local
-     * development keeps working.
-     */
-    private static final String OFFICIAL_SIGNATURE =
-            "EA89B630D74212BC87A1C17FB2E0233DA8A14502E121479EC98FE2071171BCFF";
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
         // 正式签名校验：release 包必须是官方签名，否则拒绝运行。
         // debug 包（开发用）跳过校验，本地调试不受影响。
-        if (!BuildConfig.DEBUG && !isOfficialBuild()) {
+        if (!BuildConfig.DEBUG && !MainActivity.isOfficialBuild(this)) {
             ServerLog.log(this, "签名校验失败：非官方构建，拒绝启动");
             showNotOfficialAndExit();
             return;
@@ -230,25 +216,6 @@ public class LaunchActivity extends AppCompatActivity {
         if (!a.matches("^[a-zA-Z0-9._:\\-\\[\\]]+$")) return null;
         if (!a.contains(":")) a = a + ":3000";   // default port
         return "http://" + a + "/";
-    }
-
-    /** True if the installed app is signed with the official release key. */
-    private boolean isOfficialBuild() {
-        try {
-            PackageInfo info = getPackageManager().getPackageInfo(
-                    getPackageName(), PackageManager.GET_SIGNING_CERTIFICATES);
-            Signature[] signers = info.signingInfo.getApkContentsSigners();
-            if (signers == null || signers.length == 0) return false;
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] digest = md.digest(signers[0].toByteArray());
-            StringBuilder sb = new StringBuilder();
-            for (byte b : digest) sb.append(String.format("%02X", b));
-            return OFFICIAL_SIGNATURE.equalsIgnoreCase(sb.toString());
-        } catch (Exception e) {
-            // Fail closed: an unknown signature state must not run.
-            ServerLog.log(this, "签名校验异常: " + e);
-            return false;
-        }
     }
 
     /** Block the app and tell the user this is not an official build. */

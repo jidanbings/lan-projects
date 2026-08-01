@@ -1,17 +1,19 @@
 package io.lanprojects.phone;
 
+import android.Manifest;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Environment;
 import android.provider.Settings;
+import android.view.View;
 import android.view.WindowManager;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.content.FileProvider;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
@@ -21,11 +23,11 @@ import androidx.core.view.WindowInsetsControllerCompat;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+
+import io.noties.markwon.Markwon;
 
 /**
  * Settings screen, opened from the 设置 button on the launch screen's top
@@ -35,6 +37,10 @@ import java.net.URL;
 public class SettingsActivity extends AppCompatActivity {
 
     private static final String GITHUB_URL = "https://github.com/jidanbings/lan-projects";
+
+    // Pending update download, started after notification permission is granted.
+    private String pendingUpdateUrl;
+    private String pendingUpdateVersion;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -125,6 +131,15 @@ public class SettingsActivity extends AppCompatActivity {
 
     /** Query GitHub for the latest release and prompt to update if newer. */
     private void checkForUpdate() {
+        // Only OFFICIAL builds may check for updates. Debug builds skip the
+        // startup signature gate, so without this guard a dev build could pull
+        // the official APK (which then would not install over it anyway); a
+        // re-signed release build is already blocked at LaunchActivity.
+        if (!MainActivity.isOfficialBuild(this)) {
+            android.widget.Toast.makeText(this, "非官方构建，不支持检查更新",
+                    android.widget.Toast.LENGTH_SHORT).show();
+            return;
+        }
         TextView status = findViewById(R.id.updateStatus);
         status.setText("检查中…");
         new Thread(() -> {
@@ -177,11 +192,13 @@ public class SettingsActivity extends AppCompatActivity {
                             android.widget.Toast.LENGTH_SHORT).show();
                 } else {
                     status.setText("v" + fLatest);
-                    String notes = (fBody == null || fBody.isEmpty()) ? "" : ("\n\n" + fBody);
+                    // Render the release notes (GitHub markdown) in a scrollable view.
+                    String notes = "**当前版本：v" + installed + "**\n\n"
+                            + (fBody == null || fBody.isEmpty() ? "" : fBody);
                     new AlertDialog.Builder(this)
                             .setTitle("发现新版本 v" + fLatest)
-                            .setMessage("当前 v" + installed + notes)
-                            .setPositiveButton("下载并安装", (d, w) -> downloadAndInstall(fApk))
+                            .setView(buildUpdateNotesView(notes))
+                            .setPositiveButton("下载并安装", (d, w) -> downloadAndInstall(fApk, fLatest))
                             .setNegativeButton("以后再说", null)
                             .show();
                 }
@@ -216,68 +233,61 @@ public class SettingsActivity extends AppCompatActivity {
         }
     }
 
-    /** Download the release APK to app-specific Downloads, then install. */
-    private void downloadAndInstall(String apkUrl) {
+    /** Start the foreground download service (progress / pause / cancel). */
+    private void downloadAndInstall(String apkUrl, String version) {
         if (apkUrl == null || apkUrl.isEmpty()) {
             android.widget.Toast.makeText(this, "未找到安装包下载地址", android.widget.Toast.LENGTH_SHORT).show();
             return;
         }
-        android.widget.Toast.makeText(this, "开始下载安装包，请稍候…", android.widget.Toast.LENGTH_LONG).show();
-        new Thread(() -> {
-            try {
-                File dir = new File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "");
-                if (!dir.exists() && !dir.mkdirs()) {
-                    runOnUiThread(() -> android.widget.Toast.makeText(this, "下载失败：无法创建目录",
-                            android.widget.Toast.LENGTH_SHORT).show());
-                    return;
-                }
-                File apk = new File(dir, "lan-projects-update.apk");
-                HttpURLConnection conn = (HttpURLConnection) new URL(apkUrl).openConnection();
-                conn.setConnectTimeout(15000);
-                conn.setReadTimeout(15000);
-                conn.setRequestProperty("User-Agent", "lan-projects-android/update");
-                try (InputStream in = conn.getInputStream();
-                     FileOutputStream out = new FileOutputStream(apk)) {
-                    byte[] buf = new byte[64 * 1024];
-                    int n;
-                    while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
-                }
-                conn.disconnect();
-                runOnUiThread(() -> installApk(apk));
-            } catch (Exception e) {
-                ServerLog.log(this, "下载更新失败: " + e);
-                runOnUiThread(() -> android.widget.Toast.makeText(this, "下载失败，请检查网络后重试",
-                        android.widget.Toast.LENGTH_SHORT).show());
-            }
-        }).start();
-    }
-
-    /** Install a downloaded APK (requests "unknown sources" permission first). */
-    private void installApk(File apk) {
-        if (Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
-            new AlertDialog.Builder(this)
-                    .setTitle("需要安装权限")
-                    .setMessage("请允许安装未知来源应用，然后重新点击「下载并安装」")
-                    .setPositiveButton("去设置", (d, w) -> {
-                        try {
-                            startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                                    Uri.parse("package:" + getPackageName())));
-                        } catch (Exception e) {
-                            startActivity(new Intent(Settings.ACTION_MANAGE_APPLICATIONS_SETTINGS));
-                        }
-                    })
-                    .setNegativeButton("取消", null)
-                    .show();
+        pendingUpdateUrl = apkUrl;
+        pendingUpdateVersion = version;
+        // Android 13+ needs POST_NOTIFICATIONS to show the progress notification.
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 200);
             return;
         }
-        try {
-            Uri uri = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", apk);
-            Intent intent = new Intent(Intent.ACTION_VIEW);
-            intent.setDataAndType(uri, "application/vnd.android.package-archive");
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            startActivity(intent);
-        } catch (Exception e) {
-            android.widget.Toast.makeText(this, "无法打开安装器: " + e, android.widget.Toast.LENGTH_SHORT).show();
+        startDownloadService();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == 200) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                startDownloadService();
+            } else {
+                android.widget.Toast.makeText(this, "需要通知权限才能显示下载进度", android.widget.Toast.LENGTH_SHORT).show();
+            }
         }
+    }
+
+    private void startDownloadService() {
+        if (pendingUpdateUrl == null) return;
+        Intent i = new Intent(this, UpdateDownloadService.class);
+        i.putExtra(UpdateDownloadService.EXTRA_URL, pendingUpdateUrl);
+        i.putExtra(UpdateDownloadService.EXTRA_VERSION, pendingUpdateVersion == null ? "" : pendingUpdateVersion);
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(i);
+        else startService(i);
+        android.widget.Toast.makeText(this, "已开始下载，通知栏可查看进度 / 暂停 / 取消",
+                android.widget.Toast.LENGTH_LONG).show();
+    }
+
+    /** Render the markdown release notes in a scrollable dialog view. */
+    private View buildUpdateNotesView(String markdown) {
+        ScrollView scroll = new ScrollView(this);
+        TextView tv = new TextView(this);
+        int pad = dp(20);
+        tv.setPadding(pad, dp(16), pad, dp(16));
+        tv.setTextSize(14);
+        tv.setTextIsSelectable(true);
+        Markwon.create(this).setMarkdown(tv, markdown);
+        scroll.addView(tv);
+        return scroll;
+    }
+
+    private int dp(int v) {
+        return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
     }
 }
