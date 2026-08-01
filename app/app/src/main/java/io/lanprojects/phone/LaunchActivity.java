@@ -2,7 +2,6 @@ package io.lanprojects.phone;
 
 import android.app.AlertDialog;
 import android.content.Intent;
-import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Bundle;
@@ -128,9 +127,8 @@ public class LaunchActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        // Any time the launch screen is shown, forget all previously connected
-        // devices - the home page should always start with a clean slate.
-        DeviceHistory.clear(this);
+        // Show the persisted "recently connected" servers (managed via the
+        // 清空 button). The list survives returning from a transfer session.
         refreshRecent();
 
         // Guarantee "on the home page = all connections cut": kill the node
@@ -169,13 +167,14 @@ public class LaunchActivity extends AppCompatActivity {
         for (final String url : history) {
             TextView row = new TextView(this);
             row.setText(url);
-            row.setTextColor(Color.WHITE);
+            row.setTextColor(0xFF212121);
             row.setTextSize(14);
             row.setPadding(12, 12, 12, 12);
             row.setTextIsSelectable(false);
             GradientDrawable bg = new GradientDrawable();
-            bg.setColor(0xFF37474F);
+            bg.setColor(0xFFFFFFFF);
             bg.setCornerRadius(10);
+            bg.setStroke(1, 0xFFCFD8DC);
             row.setBackground(bg);
 
             row.setOnClickListener(v -> startMain(MainActivity.MODE_CLIENT, url));

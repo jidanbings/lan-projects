@@ -72,12 +72,12 @@ public class SpeedTestActivity extends AppCompatActivity {
                 <!DOCTYPE html><html><head><meta charset="utf-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1">
                 <style>
-                body{background:#1A2226;color:#E0E0E0;font-family:sans-serif;padding:24px;text-align:center;margin:0;}
-                h1{font-size:18px;margin:8px 0;} p{color:#9AA7B0;font-size:14px;line-height:1.7;}
+                body{background:#ECEFF1;color:#212121;font-family:sans-serif;padding:24px;text-align:center;margin:0;}
+                h1{font-size:18px;margin:8px 0;} p{color:#546E7A;font-size:14px;line-height:1.7;}
                 .btn{background:#3367D6;color:#fff;border:none;padding:14px 32px;border-radius:8px;font-size:16px;margin:18px 0;}
-                .btn:disabled{background:#37474F;color:#78909C;}
-                #result{margin-top:10px;} .big{font-size:34px;font-weight:bold;color:#8AB4F8;margin:6px 0;}
-                .hint{font-size:12px;color:#546E7A;}
+                .btn:disabled{background:#B0BEC5;color:#FFFFFF;}
+                #result{margin-top:10px;} .big{font-size:34px;font-weight:bold;color:#1565C0;margin:6px 0;}
+                .hint{font-size:12px;color:#78909C;}
                 </style></head><body>
                 <h1>本机对外传输速度测试</h1>
                 <p>把加密数据真实地通过本地 WebSocket 推送出去计时，

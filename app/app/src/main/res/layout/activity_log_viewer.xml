@@ -3,14 +3,12 @@
     android:id="@+id/logViewerRoot"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#1A2226"
+    android:background="#ECEFF1"
     android:orientation="vertical">
 
-    <LinearLayout
+    <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
         android:paddingLeft="16dp"
         android:paddingRight="16dp"
         android:paddingTop="12dp"
@@ -20,18 +18,21 @@
             android:id="@+id/btnBack"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_gravity="start|center_vertical"
             android:padding="6dp"
             android:text="← 返回"
-            android:textColor="#8AB4F8"
+            android:textColor="#1565C0"
             android:textSize="15sp" />
 
         <TextView
-            android:layout_width="0dp"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
+            android:layout_gravity="center"
             android:gravity="center"
+            android:layout_marginStart="72dp"
+            android:layout_marginEnd="72dp"
             android:text="查看日志"
-            android:textColor="#FFFFFF"
+            android:textColor="#212121"
             android:textSize="17sp"
             android:textStyle="bold" />
 
@@ -39,16 +40,17 @@
             android:id="@+id/btnClear"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_gravity="end|center_vertical"
             android:padding="6dp"
             android:text="清空"
-            android:textColor="#F28B82"
+            android:textColor="#D32F2F"
             android:textSize="14sp" />
-    </LinearLayout>
+    </FrameLayout>
 
     <View
         android:layout_width="match_parent"
         android:layout_height="1dp"
-        android:background="#37474F" />
+        android:background="#D9DEE3" />
 
     <ScrollView
         android:layout_width="match_parent"
@@ -62,7 +64,7 @@
             android:layout_height="wrap_content"
             android:fontFamily="monospace"
             android:padding="12dp"
-            android:textColor="#CFE3E8"
+            android:textColor="#263238"
             android:textIsSelectable="true"
             android:textSize="11sp" />
     </ScrollView>
