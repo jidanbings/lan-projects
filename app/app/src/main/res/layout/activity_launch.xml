@@ -73,7 +73,7 @@
             android:layout_marginTop="6dp"
             android:layout_marginBottom="40dp"
             android:gravity="center"
-            android:text="把这个地址告诉对方，对方选「连接其他设备」输入此地址"
+            android:text="把这个地址告诉对方，对方扫码即可加入"
             android:textColor="#9AA7B0"
             android:textSize="12sp" />
 
@@ -84,15 +84,6 @@
             android:layout_marginBottom="16dp"
             android:backgroundTint="#3367D6"
             android:text="📱 用本设备作为启动"
-            android:textColor="#FFFFFF"
-            android:textSize="16sp" />
-
-        <Button
-            android:id="@+id/btnClient"
-            android:layout_width="match_parent"
-            android:layout_height="56dp"
-            android:backgroundTint="#37474F"
-            android:text="🔗 连接其他设备"
             android:textColor="#FFFFFF"
             android:textSize="16sp" />
 
@@ -111,7 +102,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="28dp"
             android:gravity="center"
-            android:text="「用本设备作为启动」= 本机做服务器，其他设备访问本机地址\n「连接其他设备」= 加入对方服务器（两台手机互传选这个）\n「扫码连接」= 扫对方的二维码直接加入"
+            android:text="「用本设备作为启动」= 本机做服务器，其他设备扫码加入\n「扫码连接」= 扫对方二维码（连接 / 配对 / 加入房间）"
             android:textColor="#9AA7B0"
             android:textSize="12sp" />
 

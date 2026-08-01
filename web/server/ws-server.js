@@ -158,7 +158,7 @@ export default class LanProjectsWsServer {
 
     _signalAndRelay(sender, message) {
         const room = message.roomType === 'ip'
-            ? sender.ip
+            ? this._ipRoomId()
             : message.roomId;
 
         // relay message to recipient
@@ -205,7 +205,7 @@ export default class LanProjectsWsServer {
 
     _disconnect(sender) {
         dlog('DISCONNECT peer=' + sender.id + ' ip=' + sender.ip
-            + ' remainingIpRoom=' + (this._rooms[sender.ip] ? Object.keys(this._rooms[sender.ip]).length : 0));
+            + ' remainingIpRoom=' + (this._rooms[this._ipRoomId()] ? Object.keys(this._rooms[this._ipRoomId()]).length : 0));
 
         this._removePairKey(sender.pairKey);
         sender.pairKey = null;
@@ -385,8 +385,20 @@ export default class LanProjectsWsServer {
         }
     }
 
+    /**
+     * Shared IP-room id: the server's LAN address. Every peer that connects to
+     * this server (the host's own WebView over loopback, or LAN clients from
+     * their own IPs) joins the SAME room, so they discover each other and
+     * derive the same encryption key. Using each peer's source IP instead made
+     * the host's room 127.0.0.1 and a client's room its own IP -> keys never
+     * matched and host<-client transfers could not be received/saved.
+     */
+    _ipRoomId() {
+        return this._conf.lanIp || '127.0.0.1';
+    }
+
     _joinIpRoom(peer) {
-        this._joinRoom(peer, 'ip', peer.ip);
+        this._joinRoom(peer, 'ip', this._ipRoomId());
     }
 
     _joinSecretRoom(peer, roomSecret) {
@@ -428,7 +440,7 @@ export default class LanProjectsWsServer {
 
 
     _leaveIpRoom(peer, disconnect = false) {
-        this._leaveRoom(peer, 'ip', peer.ip, disconnect);
+        this._leaveRoom(peer, 'ip', this._ipRoomId(), disconnect);
     }
 
     _leaveSecretRoom(peer, roomSecret, disconnect = false) {

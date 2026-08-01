@@ -495,20 +495,18 @@ class Peer {
 
     _initEncryption() {
         if (this._keyExchangeDone) return;
-        // Derive the key from the IP room ID, which every peer on the same LAN
-        // server shares, so the sender and the receiver ALWAYS derive the same
-        // key and transfers never corrupt.
+        // Security policy: only PAIRED peers may transfer. The E2E key is
+        // derived from the PAIRING SECRET shared only with this peer
+        // (established out-of-band via the pairing QR / 6-digit code, so an
+        // on-network attacker cannot derive it). The dedup in _updateRoomIds
+        // keeps exactly one secret per peer, so both sides hold the same one
+        // and derive the same key - transfers never corrupt.
         //
-        // IMPORTANT: the pairing secret is deliberately NOT used here. A pair
-        // secret lives in each device's own IndexedDB and is NOT guaranteed to
-        // be held by the peer on the other end (a device can store several
-        // secrets, and _roomIds['secret'] only keeps the last room joined). If
-        // the sender encrypts with a secret the receiver does not hold, every
-        // byte decrypts to garbage and transferred files silently corrupt -
-        // large binaries like APKs are hit first ("传输的文件会破损").
-        const roomId = this._roomIds['ip'];
-        if (roomId && roomId.length >= 4) {
-            this._deriveKey(roomId + 'lan-projects-encryption-salt');
+        // Unpaired peers get NO key on purpose: _requireEncryption() then
+        // refuses the transfer. There is deliberately no public fallback key.
+        const secret = this._getPairSecret();
+        if (secret && secret.length >= 4) {
+            this._deriveKey(secret + 'lan-projects-encryption-salt');
         }
     }
 
@@ -535,26 +533,27 @@ class Peer {
 
     _encrypt(data) {
         if (!this._encryptionKey) return data;
-        const iv = crypto.getRandomValues(new Uint8Array(8));
-        const view = new Uint8Array(data);
-        const result = new Uint8Array(iv.length + view.length);
-        result.set(iv);
-        for (let i = 0; i < view.length; i++) {
-            result[iv.length + i] = view[i] ^ this._encryptionKey[i % this._encryptionKey.length];
-        }
+        // ChaCha20 stream cipher - strong (TLS 1.3 / WireGuard) and far faster
+        // in pure JS than AES (noble-ciphers, ~12x vs aes-js), which matters on
+        // weak phones for big files. WebCrypto's crypto.subtle is unavailable
+        // on the non-HTTPS LAN origin, so this is the fast pure-JS choice.
+        // A fresh random 12-byte nonce is prefixed to the ciphertext.
+        const nonce = crypto.getRandomValues(new Uint8Array(12));
+        const cipher = new Uint8Array(
+            window.Chacha.chacha20(this._encryptionKey, nonce, new Uint8Array(data)));
+        const result = new Uint8Array(nonce.length + cipher.length);
+        result.set(nonce);
+        result.set(cipher, nonce.length);
         return result.buffer;
     }
 
     _decrypt(data) {
         if (!this._encryptionKey) return data;
         const view = new Uint8Array(data);
-        if (view.length < 8) return data;
-        const iv = view.slice(0, 8);
-        const result = new Uint8Array(view.length - 8);
-        for (let i = 0; i < result.length; i++) {
-            result[i] = view[8 + i] ^ this._encryptionKey[i % this._encryptionKey.length];
-        }
-        return result.buffer;
+        if (view.length < 12) return data;
+        const nonce = view.slice(0, 12);
+        const cipher = view.slice(12);
+        return window.Chacha.chacha20(this._encryptionKey, nonce, cipher).buffer;
     }
 
     /**
@@ -565,8 +564,8 @@ class Peer {
     _requireEncryption() {
         if (!this._encryptionKey) this._initEncryption();
         if (!this._encryptionKey) {
-            console.error('Blocked: E2E encryption not established, file transfer rejected');
-            Events.fire('notify-user', { message: '❌ 端对端加密未建立，已阻止文件传输' });
+            console.error('Blocked: peers not paired, transfer rejected');
+            Events.fire('notify-user', { message: '❌ 未配对，已拒绝传输。请先点击顶栏 🔗 配对' });
             this._busy = false;
             this._filesQueue = [];
             return null;
@@ -959,7 +958,7 @@ class RTCPeer extends Peer {
         if (typeof message !== 'string') {
             // File data chunk: must be end-to-end encrypted
             if (!this._encryptionKey) {
-                console.warn('Blocked: received file chunk but E2E encryption not established, dropping');
+                console.warn('Blocked: received file chunk but peers not paired, dropping');
                 return;
             }
             message = this._decrypt(message);
@@ -1243,7 +1242,7 @@ class PeersManager {
         if (messageJSON.type === 'ws-chunk') {
             // Legacy text relay (still supported, but the app now sends binary)
             if (!peer._encryptionKey) {
-                console.warn('Blocked: received ws-chunk but E2E encryption not established, dropping');
+                console.warn('Blocked: received ws-chunk but peers not paired, dropping');
                 return;
             }
             let data = base64ToArrayBuffer(messageJSON.chunk);
@@ -1261,7 +1260,7 @@ class PeersManager {
         const peer = this.peers[from];
         if (!peer) return;
         if (!peer._encryptionKey) {
-            console.warn('Blocked: received binary chunk but E2E encryption not established, dropping');
+            console.warn('Blocked: received binary chunk but peers not paired, dropping');
             return;
         }
         const decrypted = peer._decrypt(data);
@@ -1431,9 +1430,10 @@ class PeersManager {
 class FileChunker {
 
     constructor(file, onChunk, onPartitionEnd) {
-        // 1 MB chunks, sent as raw binary WebSocket frames (no base64). Larger
-        // chunks = fewer messages = less per-message overhead, and binary
-        // frames carry no encoding cost, so 1 MB is fast even on weak phones.
+        // 1 MB chunks, sent as raw binary WebSocket frames (no base64).
+        // Measured: larger chunks (4 MB) were SLOWER on real devices (bigger
+        // buffers / bursty frames hurt more than per-chunk overhead saves), so
+        // 1 MB stays the sweet spot.
         this._chunkSize = 1048576; // 1 MB
         this._maxPartitionSize = 10e6; // 10 MB - fewer control messages
         this._offset = 0;

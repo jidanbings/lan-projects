@@ -12,6 +12,10 @@ class LanProjects {
         this.deferredScripts = [
             "scripts/browser-tabs-connector.js",
             "scripts/util.js",
+            // Pure-JS ChaCha20 for E2E file encryption (fast in JS; WebCrypto's
+            // crypto.subtle is unavailable on the non-HTTPS LAN origin). Loads
+            // before network.js only defines classes, so runtime order is fine.
+            "scripts/libs/chacha20.js",
             "scripts/network.js",
             "scripts/ui.js",
             "scripts/libs/heic2any.min.js",

@@ -952,7 +952,8 @@ class ReceiveFileDialog extends ReceiveDialog {
                     element.onerror = _ => {
                         reject(`${mime} preview could not be loaded from type ${file.type}`);
                     };
-                    element.src = URL.createObjectURL(file);
+                    this._previewObjectUrl = URL.createObjectURL(file);
+                    element.src = this._previewObjectUrl;
                 }
             } catch (e) {
                 reject(`preview could not be loaded from type ${file.type}`);
@@ -1039,6 +1040,8 @@ class ReceiveFileDialog extends ReceiveDialog {
                     window.LanProjectsBridge.setPendingFileName(filenameDownload);
                 }
                 tmpZipBtn.click();
+                // Release the zipped blob URL once the download has started.
+                setTimeout(() => URL.revokeObjectURL(url), 3000);
             }
             else {
                 this._downloadFilesIndividually(files);
@@ -1088,12 +1091,17 @@ class ReceiveFileDialog extends ReceiveDialog {
         let tmpBtn = document.createElement("a");
         for (let i=0; i<files.length; i++) {
             tmpBtn.download = files[i].name;
-            tmpBtn.href = URL.createObjectURL(files[i]);
+            const url = URL.createObjectURL(files[i]);
+            tmpBtn.href = url;
             // Same as the zip path: give the Android bridge the real name.
             if (window.LanProjectsBridge) {
                 window.LanProjectsBridge.setPendingFileName(files[i].name);
             }
             tmpBtn.click();
+            // Release the object URL (and the underlying blob) after the
+            // download starts, so the app/browser memory does not balloon with
+            // every received file.
+            setTimeout(() => URL.revokeObjectURL(url), 3000);
         }
     }
 
@@ -1102,6 +1110,11 @@ class ReceiveFileDialog extends ReceiveDialog {
         setTimeout(async () => {
             this.$shareBtn.setAttribute('hidden', true);
             this.$downloadBtn.setAttribute('disabled', true);
+            // Release the preview image's object URL so the blob can be GC'd.
+            if (this._previewObjectUrl) {
+                URL.revokeObjectURL(this._previewObjectUrl);
+                this._previewObjectUrl = null;
+            }
             this.$previewBox.innerHTML = '';
             this._busy = false;
             await this._nextFiles();

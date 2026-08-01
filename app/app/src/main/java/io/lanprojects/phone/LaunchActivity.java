@@ -9,11 +9,9 @@ import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Bundle;
-import android.text.InputType;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
-import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -34,15 +32,20 @@ import java.security.MessageDigest;
 import java.util.List;
 
 /**
- * First screen shown on launch. Two ways to use the app:
+ * First screen shown on launch:
  *
- *  1. 用本设备作为启动  - this device hosts the server; others connect to it.
- *  2. 连接其他设备      - this device joins another server (e.g. a second phone
- *                         running the same app), so two phones can exchange files.
+ *  1. 用本设备作为启动 - this device hosts the server; others connect to it.
+ *  2. 扫码连接         - scan a connect / pairing / room QR to join a server,
+ *                        pair with a device, or enter a public room.
  */
 public class LaunchActivity extends AppCompatActivity {
 
-    /** Scan a connect QR code -> join that server as a client. */
+    /**
+     * Scan a QR code -> join its server as a client. The scanned content may be
+     * a plain connect QR (http://host:port/) or a pairing/room QR carrying
+     * ?pair_key= / ?room_id= - both are loaded as URLs and the web UI's
+     * evaluateUrlParams acts on any query param.
+     */
     private final ActivityResultLauncher<ScanOptions> qrScanLauncher =
             registerForActivityResult(new ScanContract(), result -> {
                 String contents = result.getContents();
@@ -51,7 +54,7 @@ public class LaunchActivity extends AppCompatActivity {
                     if (target != null) {
                         startMain(MainActivity.MODE_CLIENT, target);
                     } else {
-                        Toast.makeText(this, "二维码内容不是有效的地址", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(this, "无法识别的二维码", Toast.LENGTH_SHORT).show();
                     }
                 }
             });
@@ -113,10 +116,7 @@ public class LaunchActivity extends AppCompatActivity {
         Button btnHost = findViewById(R.id.btnHost);
         btnHost.setOnClickListener(v -> startMain(MainActivity.MODE_HOST, null));
 
-        Button btnClient = findViewById(R.id.btnClient);
-        btnClient.setOnClickListener(v -> promptForTarget());
-
-        // 扫码连接: scan another device's connect QR and join its server.
+        // 扫码连接: scan a connect / pairing / room QR and join its server.
         findViewById(R.id.btnScan).setOnClickListener(v -> {
             ScanOptions options = new ScanOptions();
             options.setPrompt("将对方二维码放入取景框");
@@ -159,6 +159,11 @@ public class LaunchActivity extends AppCompatActivity {
             stopService(new Intent(this, NodeService.class));
         } catch (Exception ignored) {
         }
+        // Belt-and-suspenders: MainActivity.onDestroy already cleans the WebView's
+        // persisted blob_storage on closing the transfer page; clean it here too
+        // in case the transfer activity was killed by the system (e.g. low memory)
+        // without a clean onDestroy.
+        MainActivity.clearWebViewBlobStorage(this);
         ServerLog.log(this, "首页已显示：已清历史、尝试杀掉服务器");
     }
 
@@ -210,34 +215,16 @@ public class LaunchActivity extends AppCompatActivity {
         startActivity(i);
     }
 
-    /** Ask for the other device's server address, then connect in client mode. */
-    private void promptForTarget() {
-        EditText input = new EditText(this);
-        input.setHint("例如 192.168.1.8 或 192.168.1.8:3000");
-        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        input.setSingleLine(true);
-
-        new AlertDialog.Builder(this)
-                .setTitle("连接其他设备")
-                .setMessage("输入对方服务器地址（端口默认 3000）")
-                .setView(input)
-                .setPositiveButton("连接", (dialog, which) -> {
-                    String target = normalizeTarget(input.getText().toString().trim());
-                    if (target == null) {
-                        Toast.makeText(this, "地址格式不正确", Toast.LENGTH_SHORT).show();
-                        return;
-                    }
-                    startMain(MainActivity.MODE_CLIENT, target);
-                })
-                .setNegativeButton("取消", null)
-                .show();
-    }
-
-    /** Turn user input into a full http URL, or null if invalid. */
+    /** Turn a scanned value into a URL to load, or null if invalid. */
     private String normalizeTarget(String input) {
         if (input == null || input.isEmpty()) return null;
         String a = input.trim();
-        a = a.replaceAll("^https?://", "");   // strip a scheme if one was typed
+        // A scanned QR may be a full URL carrying ?pair_key= or ?room_id=
+        // (pairing code / public-room code). Keep such URLs intact so the web
+        // UI's evaluateUrlParams can act on the param. A plain connect QR is
+        // just http://host:port/ and loads normally.
+        if (a.matches("^https?://.*")) return a;
+        // Otherwise a bare host[:port] address (typed manually) -> build URL.
         if (a.endsWith("/")) a = a.substring(0, a.length() - 1);
         // host or host:port - allow IPv4, hostnames and bracketed IPv6
         if (!a.matches("^[a-zA-Z0-9._:\\-\\[\\]]+$")) return null;

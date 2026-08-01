@@ -1,4 +1,4 @@
-const cacheVersion = 'v1.0.0';
+const cacheVersion = 'v1.0.57';
 const cacheTitle = `lan-projects-cache-${cacheVersion}`;
 const relativePathsToCache = [
     './',
@@ -117,7 +117,11 @@ const rootUrlLength = rootUrl.length;
 
 const doNotCacheRequest = request => {
     const requestRelativePath = request.url.substring(rootUrlLength);
+    // Never cache: the config endpoint, or blob: URL fetches - a received-file
+    // blob would otherwise be written into the Cache API and balloon the
+    // app/browser storage by the size of every transferred file.
     return relativePathsNotToCache.indexOf(requestRelativePath) !== -1
+        || request.url.startsWith('blob:')
 };
 
 // cache the current page to make it available for offline

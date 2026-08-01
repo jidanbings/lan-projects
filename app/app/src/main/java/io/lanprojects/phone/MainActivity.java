@@ -39,6 +39,7 @@ import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
 
+import java.io.File;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
@@ -48,8 +49,9 @@ import java.util.Collections;
  * Hosts the lan-projects web UI in a WebView. Two modes, chosen on the
  * launch screen:
  *
- *  - host mode: starts the in-app Node.js server (127.0.0.1:3000) and loads
- *    its UI; other devices connect to this phone's LAN address.
+ *  - host mode: starts the in-app Node.js server and loads its UI via the
+ *    phone's LAN address (shares the server's IP room with LAN clients);
+ *    other devices connect to this phone's LAN address.
  *  - client mode: does NOT start a server; instead it loads another server's
  *    UI (e.g. a second phone running the same app), so this device becomes a
  *    peer on that server and two phones can exchange files.
@@ -65,7 +67,6 @@ public class MainActivity extends AppCompatActivity {
     public static final String MODE_CLIENT = "client";
 
     private static final int SERVER_PORT = 3000;
-    private static final String SERVER_BASE = "http://127.0.0.1:" + SERVER_PORT + "/";
 
     private WebView webView;
     private TextView statusText;
@@ -274,7 +275,7 @@ public class MainActivity extends AppCompatActivity {
                     runOnUiThread(() -> {
                         if (isFinishing()) return;  // user left before the server came up
                         statusText.setText("局域网地址：\nhttp://" + ipText + ":" + SERVER_PORT);
-                        webView.loadUrl(SERVER_BASE);
+                        webView.loadUrl(serverBase());
                     });
                 }, "server-wait").start();
             });
@@ -394,6 +395,17 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
+     * URL the host's own WebView loads. Use the LAN address (not loopback
+     * 127.0.0.1) so this device joins the server's shared IP room alongside
+     * LAN clients and derives the same encryption key; fall back to loopback
+     * only when no LAN address is available.
+     */
+    private String serverBase() {
+        String ip = getLanIpAddress();
+        return "http://" + (ip == null ? "127.0.0.1" : ip) + ":" + SERVER_PORT + "/";
+    }
+
+    /**
      * The LAN server address this phone is currently using, shown as the QR.
      * host mode -> this phone IS the server (its own LAN address). client mode
      * -> the server this phone connected to (targetUrl). Using the ACTIVE
@@ -487,6 +499,14 @@ public class MainActivity extends AppCompatActivity {
             webView = null;
         }
 
+        // The Android WebView persists received-file blobs to DISK under
+        // app_webview/Default/blob_storage/ and never auto-cleans it (a desktop
+        // browser keeps blobs in memory instead). Leaving that data in place
+        // inflates the app's size by every transferred file, so wipe it as soon
+        // as the transfer page closes. The WebView is destroyed above, so this
+        // is safe; the directory is recreated on the next WebView.
+        clearWebViewBlobStorage(this);
+
         super.onDestroy();
         if (filePathCallback != null) {
             filePathCallback.onReceiveValue(null);
@@ -511,5 +531,30 @@ public class MainActivity extends AppCompatActivity {
             NodeService.killNodeProcess(this);
             ServerLog.log(this, "退出 host 传输页：服务器已处理");
         }
+    }
+
+    /** Delete the WebView's persisted blob_storage (received-file blobs). */
+    public static void clearWebViewBlobStorage(android.content.Context ctx) {
+        try {
+            File blobDir = new File(ctx.getDataDir(), "app_webview/Default/blob_storage");
+            if (blobDir.exists()) {
+                deleteRecursively(blobDir);
+                ServerLog.log(ctx, "已清理 WebView blob_storage");
+            }
+        } catch (Exception e) {
+            ServerLog.log(ctx, "清理 blob_storage 失败: " + e);
+        }
+    }
+
+    private static void deleteRecursively(File f) {
+        if (f == null || !f.exists()) return;
+        if (f.isDirectory()) {
+            File[] children = f.listFiles();
+            if (children != null) {
+                for (File c : children) deleteRecursively(c);
+            }
+        }
+        //noinspection ResultOfMethodCallIgnored
+        f.delete();
     }
 }
