@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- App icon: the lan-projects chat-bubble logo (web.ico / lan-projects.png),
+     adapted as an Android adaptive icon. The bubble spans the whole source
+     canvas, so the foreground is inset to 22% on every side to keep it inside
+     the mask's safe zone (centre ~66%) - otherwise the launcher would crop the
+     bubble's edges when it masks it into a circle/squircle. minSdk 28 means
+     every device supports adaptive icons, so no density-specific mipmaps are
+     needed. -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>

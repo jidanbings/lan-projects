@@ -1,0 +1,5 @@
+<resources>
+    <color name="white">#FFFFFF</color>
+    <!-- White canvas behind the blue chat-bubble app icon (adaptive icon). -->
+    <color name="ic_launcher_background">#FFFFFF</color>
+</resources>

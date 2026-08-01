@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Scanning the connect QR code (zxing capture activity). -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+
+    <application
+        android:name=".App"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.LanProjects"
+        android:usesCleartextTraffic="true">
+
+        <!-- First screen: choose host mode or connect to another device. -->
+        <activity
+            android:name=".LaunchActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density" />
+
+        <!-- Reads files/server.log + crash.log. Only opened from the launch
+             screen's 查看日志 button; never exported to other apps. -->
+        <activity
+            android:name=".LogViewerActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density" />
+
+        <!-- Settings: version, log viewer, about, GitHub link. Opened from the
+             launch screen's top-right 设置 button; never exported. -->
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density" />
+
+        <!-- Speed test (self benchmark of the phone's data-processing speed). -->
+        <activity
+            android:name=".SpeedTestActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density" />
+
+        <!-- Run Node in its own process so that (a) "back to launch screen"
+             stops the server for real (the process is killed), and (b) a Node
+             crash can never take down the UI process hosting the launch screen. -->
+        <service
+            android:name=".NodeService"
+            android:exported="false"
+            android:process=":node"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Custom WeChat-style scanner: portrait, back button, green viewfinder.
+             Launched via ScanOptions.setCaptureActivity(ScanActivity.class). -->
+        <activity
+            android:name=".ScanActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:theme="@style/ScanTheme"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density" />
+
+    </application>
+</manifest>

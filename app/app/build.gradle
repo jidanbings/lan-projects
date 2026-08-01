@@ -1,0 +1,114 @@
+plugins {
+    id 'com.android.application'
+}
+
+// ------------------------------------------------------------------
+//  Release signing.
+//  The release keystore and its passwords live in the git-ignored
+//  app/keystore.properties (NEVER committed). If that file is absent
+//  - e.g. a fresh clone without the developer's private keystore -
+//  release builds fall back to being unsigned so the project still
+//  compiles. Ship only properly-signed release APKs.
+// ------------------------------------------------------------------
+def keystorePropsFile = rootProject.file('keystore.properties')
+def keystoreProps = new Properties()
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+
+// Version lives in app/version.properties, bumped by build-apk.bat.
+def versionPropsFile = file('version.properties')
+def versionProps = new Properties()
+if (versionPropsFile.exists()) {
+    versionPropsFile.withInputStream { versionProps.load(it) }
+}
+
+android {
+    namespace 'io.lanprojects.phone'
+    compileSdk 35
+
+    // LaunchActivity's runtime signature check reads BuildConfig.DEBUG.
+    buildFeatures {
+        buildConfig true
+    }
+
+    defaultConfig {
+        applicationId "io.lanprojects.phone"
+        minSdk 28
+        targetSdk 35
+        versionCode versionProps.getProperty('versionCode', '1').toInteger()
+        versionName versionProps.getProperty('versionName', '1.0.0')
+
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++17"
+            }
+        }
+        // Matches the NDK era nodejs-mobile 18.x was built with (r23c).
+        ndkVersion "23.2.8568313"
+        ndk {
+            // 64-bit only: nearly every Android 9+ device is arm64. Dropping
+            // 32-bit (armeabi-v7a) removes a second libnode.so (~46 MB), at the
+            // cost of the rare low-end 32-bit Android 9 devices.
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    packagingOptions {
+        jniLibs {
+            // Compress libnode.so inside the APK (it is extracted at install
+            // time). Keeps the APK much smaller; trade-off is a little extra
+            // storage/install time on the device.
+            useLegacyPackaging true
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+
+    signingConfigs {
+        release {
+            if (keystorePropsFile.exists()) {
+                storeFile file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // Sign only when the private keystore is present (see above).
+            if (keystorePropsFile.exists()) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+// Transitive deps pull mixed kotlin-stdlib versions; unify them.
+configurations.configureEach {
+    resolutionStrategy {
+        force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22'
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    // QR code: scan (camera) + generate the launch screen's connect QR.
+    implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
+}

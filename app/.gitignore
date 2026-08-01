@@ -1,0 +1,16 @@
+# Gradle
+.gradle/
+build/
+local.properties
+*.apk
+captures/
+
+# Signing: NEVER commit the keystore or its passwords.
+keystore.properties
+*.jks
+*.keystore
+
+# CMake / native
+.cxx/
+.externalNativeBuild/
+CMakeUserPresets.json

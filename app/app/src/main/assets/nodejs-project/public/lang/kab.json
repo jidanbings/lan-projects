@@ -1,0 +1,39 @@
+{
+    "dialogs": {
+        "message_placeholder": "Aḍris",
+        "send-message-title": "Azen izen",
+        "copy": "Nɣel",
+        "title-image-plural": "Tugniwin",
+        "send": "Azen",
+        "title-image": "Tugna",
+        "title-file-plural": "Ifuyla",
+        "base64-text": "aḍris",
+        "auto-accept-instructions-1": "Rmed",
+        "base64-files": "Ifuyla",
+        "hr-or": "NEƔ",
+        "send-message-to": "I:",
+        "title-file": "Afaylu",
+        "close": "Mdel",
+        "accept": "Qbel",
+        "share": "Beṭṭu",
+        "download": "Asider",
+        "language-selector-title": "Sbedd tutlayt",
+        "system-language": "Tutlayt n unagraw",
+        "cancel": "Sefsex"
+    },
+    "about": {
+        "github_title": "lan-projects deg GitHub",
+        "close-about_aria-label": "Mdel Ɣef lan-projects"
+    },
+    "notifications": {
+        "connecting": "Tuqqna…",
+        "connected": "Yeqqen"
+    },
+    "header": {
+        "about_aria-label": "Ldi Ɣef lan-projects",
+        "about_title": "Ɣef lan-projects",
+        "language-selector_title": "Fren tutlayt",
+        "install_title": "Sbedd lan-projects",
+        "edit-share-mode": "Ẓreg"
+    }
+}

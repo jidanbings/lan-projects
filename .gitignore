@@ -1,0 +1,9 @@
+node_modules/
+package-lock.json
+*.log
+.env
+.DS_Store
+Thumbs.db
+
+# Build artifacts: APKs are distributed via GitHub Releases, not committed.
+*.apk
