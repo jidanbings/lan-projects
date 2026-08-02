@@ -13,6 +13,7 @@ import android.os.Environment;
 import android.os.IBinder;
 
 import androidx.core.app.NotificationCompat;
+import androidx.core.app.ServiceCompat;
 import androidx.core.content.FileProvider;
 
 import java.io.File;
@@ -69,7 +70,7 @@ public class UpdateDownloadService extends Service {
         if (ACTION_CANCEL.equals(action)) {
             cancelled = true;
             if (thread != null) thread.interrupt();
-            stopForeground(true);
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE);
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -143,7 +144,7 @@ public class UpdateDownloadService extends Service {
 
     private void complete() {
         installApk(target);
-        stopForeground(true);
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE);
         stopSelf();
     }
 
@@ -155,7 +156,7 @@ public class UpdateDownloadService extends Service {
                 .setAutoCancel(true)
                 .build();
         ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).notify(NOTIF_ID, n);
-        stopForeground(true);
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE);
         stopSelf();
     }
 

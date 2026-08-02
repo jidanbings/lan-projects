@@ -35,9 +35,20 @@ public class App extends Application {
                     File f = new File(dir, "crash.log");
                     String ts = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
                             .format(new Date());
+                    // Tag each entry with the installed app version, the process
+                    // (main UI process vs. the ":node" server process) and the
+                    // crashing thread, so a crash.log entry can be tied to a
+                    // build and a code path without logcat.
+                    String ver = "?";
+                    try {
+                        ver = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+                    } catch (Exception ignored) {
+                    }
                     try (FileOutputStream os = new FileOutputStream(f, true);
                          PrintWriter w = new PrintWriter(os)) {
-                        w.println("=== " + ts + "  thread=" + thread.getName() + " ===");
+                        w.println("=== " + ts + "  apk v" + ver
+                                + "  proc=" + getProcessName()
+                                + "  thread=" + thread.getName() + " ===");
                         throwable.printStackTrace(w);
                         w.println();
                         w.flush();

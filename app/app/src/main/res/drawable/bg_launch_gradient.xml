@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Launch screen background: subtle dark blue-grey gradient so the hero area
+     is slightly lighter near the top while the whole page stays in the same
+     #263238 family as the app theme and MainActivity's top bar. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:angle="270"
+        android:startColor="#2C3A43"
+        android:endColor="#1E2A2F" />
+</shape>

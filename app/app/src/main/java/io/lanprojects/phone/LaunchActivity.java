@@ -1,6 +1,8 @@
 package io.lanprojects.phone;
 
 import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
@@ -86,9 +88,33 @@ public class LaunchActivity extends AppCompatActivity {
             return WindowInsetsCompat.CONSUMED;
         });
 
-        TextView lanIp = findViewById(R.id.lanIp);
-        String ip = MainActivity.getLanIpAddress();
-        lanIp.setText(ip == null ? "未知" : ip);
+        // Show the full server URL (not the bare IP) so the address can be
+        // opened directly in a browser or forwarded to a friend as-is.
+        refreshIpStatus();
+
+        // Pull down at the top of the home screen to re-read the LAN address
+        // (the IP changes when switching WiFi networks). The custom
+        // PullRefreshLayout drags the page down with the finger and shows a
+        // spinner (a native SwipeRefreshLayout cannot be added - the build
+        // machine is offline, so the behaviour is reimplemented).
+        ((PullRefreshLayout) findViewById(R.id.launchRoot)).setOnRefresh(() -> {
+            refreshIpStatus();
+            Toast.makeText(this, "已刷新局域网地址", Toast.LENGTH_SHORT).show();
+        });
+
+        // Copy the full server URL (http://<ip>:3000) so it can be pasted into
+        // a browser or sent to a friend on the LAN.
+        findViewById(R.id.btnCopyIp).setOnClickListener(v -> {
+            String lan = MainActivity.getLanIpAddress();
+            if (lan == null) {
+                Toast.makeText(this, "未检测到局域网地址，请检查网络连接", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            String url = "http://" + lan + ":3000";
+            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            cm.setPrimaryClip(ClipData.newPlainText("lan-projects 局域网地址", url));
+            Toast.makeText(this, "已复制：" + url, Toast.LENGTH_SHORT).show();
+        });
 
         // Show the build version so it is obvious which APK is installed
         // (every update bumps it - useful when debugging stale builds).
@@ -151,6 +177,18 @@ public class LaunchActivity extends AppCompatActivity {
         ServerLog.log(this, "首页已显示：已清历史、尝试杀掉服务器");
     }
 
+    /** Re-read the LAN address and refresh the status card (URL + dot + label). */
+    private void refreshIpStatus() {
+        String ip = MainActivity.getLanIpAddress();
+        ((TextView) findViewById(R.id.lanIp)).setText(
+                ip == null ? "未知" : "http://" + ip + ":3000");
+        View statusDot = findViewById(R.id.statusDot);
+        statusDot.setBackgroundResource(
+                ip == null ? R.drawable.bg_dot_offline : R.drawable.bg_dot_online);
+        ((TextView) findViewById(R.id.connectionText)).setText(
+                ip == null ? "未连接网络" : "局域网已连接");
+    }
+
     /** Show the list of previously connected servers (tap to reconnect). */
     private void refreshRecent() {
         LinearLayout container = findViewById(R.id.recentList);
@@ -167,14 +205,15 @@ public class LaunchActivity extends AppCompatActivity {
         for (final String url : history) {
             TextView row = new TextView(this);
             row.setText(url);
-            row.setTextColor(0xFF212121);
+            row.setTextColor(0xFFECEFF1);
             row.setTextSize(14);
             row.setPadding(12, 12, 12, 12);
             row.setTextIsSelectable(false);
+            // Dark card matching the launch screen's theme.
             GradientDrawable bg = new GradientDrawable();
-            bg.setColor(0xFFFFFFFF);
-            bg.setCornerRadius(10);
-            bg.setStroke(1, 0xFFCFD8DC);
+            bg.setColor(0x1AFFFFFF);
+            bg.setCornerRadius(12);
+            bg.setStroke(1, 0x22FFFFFF);
             row.setBackground(bg);
 
             row.setOnClickListener(v -> startMain(MainActivity.MODE_CLIENT, url));

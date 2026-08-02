@@ -3,6 +3,7 @@ package io.lanprojects.phone;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.content.res.AssetManager;
@@ -36,6 +37,19 @@ public class NodeService extends Service {
 
     public static final String ACTION_START = "io.lanprojects.phone.START_SERVER";
     public static final String ACTION_STOP = "io.lanprojects.phone.STOP_SERVER";
+    // Fired by the notification's deleteIntent when the user swipes it away.
+    // The service re-posts the notification so it can only be removed by
+    // actually stopping the server (back to the launch screen).
+    public static final String ACTION_NOTIF_DISMISS = "io.lanprojects.phone.NOTIF_DISMISS";
+
+    private static final int NOTIF_ID = 1;
+
+    // True once the server has actually been started (ACTION_START). The
+    // notification re-post action only runs while this is set: it prevents a
+    // stale dismiss intent (fired just as the service stopped / process died)
+    // from resurrecting the service and re-posting a "server running"
+    // notification for a server that no longer exists.
+    private volatile boolean serverRunning = false;
 
     @Override
     public void onCreate() {
@@ -47,6 +61,7 @@ public class NodeService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent != null ? intent.getAction() : ACTION_START;
         if (ACTION_STOP.equals(action)) {
+            serverRunning = false;
             stopForeground(STOP_FOREGROUND_REMOVE);
             // Forget the PID file so a stale value can never be reused to kill
             // an unrelated recycled process later. (onDestroy then hard-exits
@@ -58,7 +73,21 @@ public class NodeService extends Service {
             stopSelf();
             return START_NOT_STICKY;
         }
-        startForeground(1, buildNotification());
+        if (ACTION_NOTIF_DISMISS.equals(action)) {
+            // Android 14+ lets the user swipe away the foreground-service
+            // notification even though it is ongoing. Re-post it immediately
+            // via startForeground so the server notification can only be
+            // removed by actually stopping the server. Guarded by
+            // serverRunning so a stale dismiss intent (fired as the service
+            // was stopping) can never re-paste a notification for a dead
+            // server.
+            if (serverRunning) {
+                startForeground(NOTIF_ID, buildNotification());
+            }
+            return START_NOT_STICKY;
+        }
+        serverRunning = true;
+        startForeground(NOTIF_ID, buildNotification());
         ServerLog.log(this, "NodeService onStartCommand: ACTION_START");
 
         // All the heavyweight startup (stale-server cleanup, port wait, PID
@@ -327,10 +356,21 @@ public class NodeService extends Service {
                     getResources(), R.drawable.ic_stat_transparent));
         } catch (Exception ignored) {
         }
+        // When the user swipes the notification away (Android 14+ allows this
+        // even for ongoing foreground-service notifications), fire the dismiss
+        // intent so the service re-posts it instantly. Only a real server stop
+        // (stopForeground on ACTION_STOP / process kill) removes it for good.
+        PendingIntent dismiss = PendingIntent.getService(this, 4,
+                new Intent(this, NodeService.class).setAction(ACTION_NOTIF_DISMISS),
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         return builder
                 .setContentTitle("lan-projects")
                 .setContentText("局域网文件共享服务器运行中")
                 .setOngoing(true)
+                .setLocalOnly(true)
+                .setCategory(Notification.CATEGORY_SERVICE)
+                .setOnlyAlertOnce(true)
+                .setDeleteIntent(dismiss)
                 .build();
     }
 

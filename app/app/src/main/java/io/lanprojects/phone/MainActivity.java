@@ -142,6 +142,13 @@ public class MainActivity extends AppCompatActivity {
         s.setAllowFileAccess(false);
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setCacheMode(WebSettings.LOAD_DEFAULT);
+        // This is a LAN-only tool: skip Google SafeBrowsing's blocklist lookups
+        // on every page load (faster first paint, no queries leave the device
+        // for LAN addresses).
+        s.setSafeBrowsingEnabled(false);
+        // Pre-raster the page while the WebView is off-screen so the transfer
+        // UI appears as soon as the page is ready.
+        s.setOffscreenPreRaster(true);
         webView.setBackgroundColor(Color.WHITE);
 
         // Bridge used by the injected blob-download routine. Kept as a field so
@@ -240,14 +247,17 @@ public class MainActivity extends AppCompatActivity {
         statusText.setText("正在清理旧服务器…");
 
         new Thread(() -> {
-            // Give the old server (if any) time to die and release port 3000.
-            // If we started the new server before the old one was gone, node
-            // would hit EADDRINUSE and the new server would never come up -
-            // leaving the old stale server (with all its old peers) in charge.
-            long cleanDeadline = System.currentTimeMillis() + 8_000;
-            while (System.currentTimeMillis() < cleanDeadline && isServerUp()) {
+            // Give the old server (if any) time to die and release port 3000,
+            // so the "server up" poll below cannot latch onto a stale server
+            // still answering. killNodeProcess + stopService above have already
+            // SIGKILLed the old process, so the port frees in milliseconds; a
+            // fast local bind probe is enough. NodeService additionally waits
+            // for the port itself (waitForPortFree) before launching node, so
+            // there is no EADDRINUSE risk even if we raced.
+            long cleanDeadline = System.currentTimeMillis() + 5_000;
+            while (System.currentTimeMillis() < cleanDeadline && !isPortFree()) {
                 try {
-                    Thread.sleep(200);
+                    Thread.sleep(150);
                 } catch (InterruptedException ignored) {
                 }
             }
@@ -267,11 +277,11 @@ public class MainActivity extends AppCompatActivity {
 
                 // Wait until the new server is listening, then load the UI.
                 new Thread(() -> {
-                    long deadline = System.currentTimeMillis() + 60_000;
+                    long deadline = System.currentTimeMillis() + 30_000;
                     while (System.currentTimeMillis() < deadline) {
                         if (isServerUp()) break;
                         try {
-                            Thread.sleep(400);
+                            Thread.sleep(250);
                         } catch (InterruptedException ignored) {
                         }
                     }
@@ -365,6 +375,20 @@ public class MainActivity extends AppCompatActivity {
             return true;
         } catch (Exception e) {
             return false;
+        }
+    }
+
+    /**
+     * True if nothing is listening on port 3000 yet (fast local bind probe,
+     * used during host-mode startup cleanup so the UI never latches onto a
+     * stale server's room). Mirrors NodeService.portFree().
+     */
+    private boolean isPortFree() {
+        try (java.net.ServerSocket ss = new java.net.ServerSocket(SERVER_PORT, 1,
+                java.net.InetAddress.getByName("127.0.0.1"))) {
+            return true; // bound successfully -> port was free
+        } catch (Exception e) {
+            return false; // port in use
         }
     }
 

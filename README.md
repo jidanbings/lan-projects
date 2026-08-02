@@ -141,7 +141,6 @@ lsof -ti:3000 | xargs kill -9
 ```
 lan-projects/
 ├── app/                      # Android App（嵌入 Node.js 运行时，手机即服务器）
-│   ├── build-apk.bat         # 一键打包 APK（自动从 web\ 同步代码 + 构建 + 清理）
 │   └── app/src/main/
 │       ├── assets/nodejs-project/   # 打包进 APK 的 web 代码（构建时同步）
 │       ├── java/io/lanprojects/phone/  # Android 源码
@@ -155,11 +154,12 @@ lan-projects/
 ├── desktop/                  # 电脑端启动
 │   └── start.bat             # Windows 一键启动（自动切到 web\ 运行）
 ├── README.md                 # 本文档（使用 / 启动）
+├── ARCHITECTURE.md           # 架构介绍（面向用户：系统组成、传输链路、安全模型）
 ├── updatelog.md              # 更新日志
 └── LICENSE
 ```
 
-> **web/** 是 App 和电脑端**共享的唯一代码源**：电脑端 `desktop\start.bat` 直接跑它，Android 打包时由 `app\build-apk.bat` 同步进 assets。
+> **web/** 是 App 和电脑端**共享的唯一代码源**：电脑端 `desktop\start.bat` 直接跑它，Android 打包时由开发机上的 `build-apk.bat`（仓库外）同步进 assets。
 
 ---
 
