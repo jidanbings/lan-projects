@@ -1,7 +1,5 @@
 package io.lanprojects.phone;
 
-import android.content.Intent;
-import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.WindowManager;
@@ -13,12 +11,6 @@ import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
-
-import io.noties.markwon.Markwon;
-import io.noties.markwon.MarkwonConfiguration;
-import io.noties.markwon.AbstractMarkwonPlugin;
-import io.noties.markwon.ext.strikethrough.StrikethroughPlugin;
-import io.noties.markwon.ext.tables.TablePlugin;
 
 /**
  * "隐私与 SDK" page: renders a bundled, detailed privacy policy plus an
@@ -52,29 +44,7 @@ public class PrivacyActivity extends AppCompatActivity {
         findViewById(R.id.btnPrivacyBack).setOnClickListener(v -> finish());
 
         TextView tv = findViewById(R.id.privacyContent);
-        markwon().setMarkdown(tv, PRIVACY_MARKDOWN);
-    }
-
-    /** Markwon configured with tables + strikethrough; links open in browser. */
-    private Markwon markwon() {
-        return Markwon.builder(this)
-                .usePlugin(StrikethroughPlugin.create())
-                .usePlugin(TablePlugin.create(this))
-                .usePlugin(new AbstractMarkwonPlugin() {
-                    @Override
-                    public void configureConfiguration(MarkwonConfiguration.Builder builder) {
-                        builder.linkResolver((view, link) -> {
-                            if (link != null
-                                    && (link.startsWith("http://") || link.startsWith("https://"))) {
-                                try {
-                                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(link)));
-                                } catch (Exception ignored) {
-                                }
-                            }
-                        });
-                    }
-                })
-                .build();
+        MarkdownRenderer.create(this).setMarkdown(tv, PRIVACY_MARKDOWN);
     }
 
     private static final String PRIVACY_MARKDOWN = "" +
@@ -82,7 +52,7 @@ public class PrivacyActivity extends AppCompatActivity {
             "\n" +
             "## 一、数据不会离开你的局域网\n" +
             "\n" +
-            "lan-projects 的**所有文件传输都在局域网内完成**：一台设备作为服务器，其他设备通过局域网 IP 连接，文件在设备之间直接传输（或经内置服务器中继）。App **不会**把任何文件、日志或个人数据上传到云端，不收集统计 / 广告 / 用户行为数据，也不消耗互联网流量。\n" +
+            "lan-projects 的**所有文件传输都在局域网内完成**：一台设备作为服务器，其他设备通过局域网 IP 连接，文件在设备之间直接传输（或经内置服务器中继）。App **不会**把任何文件、日志或个人数据上传到云端，不收集统计 / 广告 / 用户行为数据，日常文件传输不消耗互联网流量。\n" +
             "\n" +
             "- 内置服务器只监听局域网地址（10.x / 172.16-31.x / 192.168.x），**不监听公网接口**；\n" +
             "- 传输内容使用 **ChaCha20 端到端加密**，只有已配对（扫码或 6 位配对码）的设备持有密钥，未配对的设备即使截获数据也无法解密；\n" +
@@ -112,10 +82,11 @@ public class PrivacyActivity extends AppCompatActivity {
             "\n" +
             "## 四、何时会访问公网\n" +
             "\n" +
-            "仅在以下两种**你主动触发**的情况下访问互联网（均不包含个人数据）：\n" +
+            "仅在以下**你主动触发**的情况下访问互联网（请求中**不含任何个人数据**）：\n" +
             "\n" +
-            "1. 「检查更新」→ 查询 GitHub Releases API；\n" +
-            "2. 「关于本软件」→ 加载 GitHub README 文档。\n" +
+            "1. 「检查更新」→ 查询 GitHub 最新版本信息。国内直连 GitHub 可能不通或很慢，App 会**自动依次尝试多个第三方加速代理**（ghfast.top / gh.ddlc.top / gh-proxy.com / ghproxy.net，均为社区公开的转发服务）获取同一份版本信息，请求会经由这些第三方服务器中转；\n" +
+            "2. 「下载更新包」→ 从 GitHub Releases 下载官方 APK，**优先经上述加速代理下载、GitHub 直连兜底**——文件经过第三方服务器中转，且可能被代理服务缓存；\n" +
+            "3. 「关于本软件」→ 加载 GitHub 上的 README 文档。\n" +
             "\n" +
             "除此之外，App 运行时不依赖任何公网服务。\n" +
             "\n" +
@@ -160,6 +131,8 @@ public class PrivacyActivity extends AppCompatActivity {
             "| heic2any | MIT | HEIC 图片预览转换 |\n" +
             "\n" +
             "以上所有组件均**不包含**统计、广告、云上报或第三方跟踪代码。\n" +
+            "\n" +
+            "> **关于更新加速代理**：「检查更新 / 下载更新包」经由第三方加速代理（ghfast.top / gh.ddlc.top / gh-proxy.com / ghproxy.net）转发 GitHub。它们是社区公开服务、**非本 App 内置组件**，域名可能变更；App 会自动依次尝试并在源失败时切换，无需手动配置。\n" +
             "\n" +
             "> 本项目为开源软件，完整源码与许可证文本见 GitHub：https://github.com/jidanbings/lan-projects";
 }

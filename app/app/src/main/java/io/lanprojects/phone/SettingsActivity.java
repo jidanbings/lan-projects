@@ -9,6 +9,8 @@ import android.os.Bundle;
 import android.provider.Settings;
 import android.view.View;
 import android.view.WindowManager;
+import android.view.ViewGroup;
+import android.widget.FrameLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
@@ -20,7 +22,6 @@ import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
 
-import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.InputStream;
@@ -28,8 +29,6 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
-
-import io.noties.markwon.Markwon;
 
 /**
  * Settings screen, opened from the 设置 button on the launch screen's top
@@ -319,8 +318,19 @@ public class SettingsActivity extends AppCompatActivity {
         tv.setPadding(pad, dp(16), pad, dp(16));
         tv.setTextSize(14);
         tv.setTextIsSelectable(true);
-        Markwon.create(this).setMarkdown(tv, markdown);
+        // Same rich markdown (tables, strikethrough, clickable links) as the
+        // About / Privacy pages so GitHub release notes render correctly.
+        MarkdownRenderer.create(this).setMarkdown(tv, markdown);
         scroll.addView(tv);
+        // Cap the dialog height so a long changelog doesn't push the buttons off
+        // screen; short notes still wrap to their natural height.
+        int maxHeight = (int) (getResources().getDisplayMetrics().heightPixels * 0.6f);
+        scroll.addOnLayoutChangeListener((v, l, t, r, b, oL, oT, oR, oB) -> {
+            if (b - t > maxHeight) {
+                v.setLayoutParams(new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, maxHeight));
+            }
+        });
         return scroll;
     }
 
