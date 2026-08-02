@@ -21,6 +21,7 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.List;
 
 /**
  * Foreground service that downloads the update APK with a progress notification
@@ -30,7 +31,7 @@ import java.net.URL;
  */
 public class UpdateDownloadService extends Service {
 
-    public static final String EXTRA_URL = "url";
+    public static final String EXTRA_URLS = "urls";
     public static final String EXTRA_VERSION = "version";
 
     private static final String CHANNEL_ID = "update-download";
@@ -42,7 +43,7 @@ public class UpdateDownloadService extends Service {
     private Thread thread;
     private volatile boolean paused = false;
     private volatile boolean cancelled = false;
-    private String url;
+    private List<String> urls;
     private String version;
     private File target;
     private long total = -1;
@@ -75,7 +76,7 @@ public class UpdateDownloadService extends Service {
             return START_NOT_STICKY;
         }
 
-        url = intent.getStringExtra(EXTRA_URL);
+        urls = intent.getStringArrayListExtra(EXTRA_URLS);
         version = intent.getStringExtra(EXTRA_VERSION);
         target = new File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "lan-projects-update.apk");
         showForegroundNotification(NOTIF_ID, buildNotification("开始下载…", 0, false));
@@ -93,11 +94,24 @@ public class UpdateDownloadService extends Service {
     }
 
     private void download() {
+        // 依次尝试多个下载源（加速代理在前，GitHub 直连兜底），任一源成功即完成，
+        // 全部失败才报错。跨源可断点续传：所有源指向同一个 APK、字节一致，offset 可延续。
+        for (int i = 0; i < urls.size(); i++) {
+            if (cancelled) return;
+            updateNotif("正在连接下载源 " + (i + 1) + "/" + urls.size() + "…", offset);
+            if (tryDownload(urls.get(i))) return;   // 成功时内部已 complete()
+        }
+        if (cancelled) return;
+        fail("所有下载源均失败，请稍后重试");
+    }
+
+    /** 尝试用单个源下载；成功（含已完成）返回 true，失败返回 false 交由下一个源尝试。 */
+    private boolean tryDownload(String url) {
         try {
             HttpURLConnection head = (HttpURLConnection) new URL(url).openConnection();
             head.setRequestMethod("HEAD");
             head.setRequestProperty("User-Agent", "lan-projects-android/update");
-            head.setConnectTimeout(15000);
+            head.setConnectTimeout(10000);
             total = head.getContentLengthLong();
             head.disconnect();
         } catch (Exception ignored) {
@@ -105,19 +119,16 @@ public class UpdateDownloadService extends Service {
 
         try {
             HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-            conn.setConnectTimeout(15000);
+            conn.setConnectTimeout(10000);
             conn.setReadTimeout(15000);
             conn.setRequestProperty("User-Agent", "lan-projects-android/update");
             if (offset > 0) conn.setRequestProperty("Range", "bytes=" + offset + "-");
             int code = conn.getResponseCode();
             if (code == 416) {           // range not satisfiable: already fully downloaded
                 complete();
-                return;
+                return true;
             }
-            if (code != 200 && code != 206) {
-                fail("下载失败 (HTTP " + code + ")");
-                return;
-            }
+            if (code != 200 && code != 206) return false;
 
             try (InputStream in = conn.getInputStream();
                  FileOutputStream out = new FileOutputStream(target, offset > 0)) {
@@ -132,14 +143,16 @@ public class UpdateDownloadService extends Service {
                 }
             }
             conn.disconnect();
+            if (cancelled) return false;
+            complete();
+            return true;
         } catch (InterruptedException ie) {
             // paused during cancel
+            return false;
         } catch (Exception e) {
-            if (!cancelled) fail("下载失败: " + e);
-            return;
+            if (!cancelled) ServerLog.log(this, "下载源失败 " + url + ": " + e);
+            return false;
         }
-        if (cancelled) return;
-        complete();
     }
 
     private void complete() {
