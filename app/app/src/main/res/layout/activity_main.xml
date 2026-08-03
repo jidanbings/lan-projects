@@ -3,16 +3,17 @@
     android:id="@+id/root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#263238"
+    android:background="#ECEFF1"
     android:orientation="vertical">
 
     <!-- Top bar: status text (LAN address) on the left, 返回 button on the right.
          The button forcibly returns to the launch screen and tears down all
-         services (see MainActivity#finish -> onDestroy). -->
+         services (see MainActivity#finish -> onDestroy). Light gray to match
+         the settings page / the app's light theme. -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="#263238"
+        android:background="#ECEFF1"
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
@@ -23,7 +24,7 @@
             android:layout_weight="1"
             android:padding="10dp"
             android:text="服务器启动中…"
-            android:textColor="#FFFFFF"
+            android:textColor="#263238"
             android:textSize="14sp" />
 
         <!-- 显示二维码 / 刷新 / 返回, with tight spacing between them. -->
@@ -34,14 +35,17 @@
             android:layout_marginStart="6dp"
             android:layout_marginTop="4dp"
             android:layout_marginBottom="4dp"
-            android:backgroundTint="#37474F"
+            android:background="@drawable/bg_top_bar_btn"
             android:minWidth="0dp"
             android:minHeight="0dp"
-            android:paddingLeft="12dp"
-            android:paddingRight="12dp"
+            android:paddingLeft="10dp"
+            android:paddingTop="5dp"
+            android:paddingRight="10dp"
+            android:paddingBottom="5dp"
+            android:stateListAnimator="@null"
             android:text="二维码"
-            android:textColor="#FFFFFF"
-            android:textSize="13sp" />
+            android:textColor="#263238"
+            android:textSize="12sp" />
 
         <Button
             android:id="@+id/btnRefresh"
@@ -50,14 +54,17 @@
             android:layout_marginTop="4dp"
             android:layout_marginBottom="4dp"
             android:layout_marginEnd="2dp"
-            android:backgroundTint="#37474F"
+            android:background="@drawable/bg_top_bar_btn"
             android:minWidth="0dp"
             android:minHeight="0dp"
-            android:paddingLeft="12dp"
-            android:paddingRight="12dp"
+            android:paddingLeft="10dp"
+            android:paddingTop="5dp"
+            android:paddingRight="10dp"
+            android:paddingBottom="5dp"
+            android:stateListAnimator="@null"
             android:text="刷新"
-            android:textColor="#FFFFFF"
-            android:textSize="13sp" />
+            android:textColor="#263238"
+            android:textSize="12sp" />
 
         <Button
             android:id="@+id/btnBack"
@@ -66,14 +73,17 @@
             android:layout_marginTop="4dp"
             android:layout_marginBottom="4dp"
             android:layout_marginEnd="4dp"
-            android:backgroundTint="#37474F"
+            android:background="@drawable/bg_top_bar_btn"
             android:minWidth="0dp"
             android:minHeight="0dp"
-            android:paddingLeft="12dp"
-            android:paddingRight="12dp"
+            android:paddingLeft="10dp"
+            android:paddingTop="5dp"
+            android:paddingRight="10dp"
+            android:paddingBottom="5dp"
+            android:stateListAnimator="@null"
             android:text="返回"
-            android:textColor="#FFFFFF"
-            android:textSize="13sp" />
+            android:textColor="#263238"
+            android:textSize="12sp" />
     </LinearLayout>
 
     <WebView

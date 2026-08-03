@@ -31,8 +31,8 @@ public class PrivacyActivity extends AppCompatActivity {
         }
         WindowInsetsControllerCompat insetsController =
                 WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
-        insetsController.setAppearanceLightStatusBars(false);
-        insetsController.setAppearanceLightNavigationBars(false);
+        insetsController.setAppearanceLightStatusBars(true);
+        insetsController.setAppearanceLightNavigationBars(true);
 
         ViewCompat.setOnApplyWindowInsetsListener(
                 findViewById(R.id.privacyRoot), (v, windowInsets) -> {
@@ -68,13 +68,15 @@ public class PrivacyActivity extends AppCompatActivity {
             "| 接收的文件 | 系统「下载」目录 | 文件传输 | 否 |\n" +
             "\n" +
             "- 日志只保留**最近 100 条**，更早的自动删除；\n" +
+            "- 首页「网络状态」识别的当前网络类型 / WiFi 网络名 / IP **只在内存中用于显示，不写入任何存储**；读取 WiFi 名需要系统权限（Android 13+ 附近 WiFi 设备、Android 9-12 位置），拒绝授权只是不显示名字，不影响传输；\n" +
             "- 卸载 App 即清除以上全部本地数据。\n" +
             "\n" +
             "## 三、权限用途说明\n" +
             "\n" +
             "| 权限 | 用途 |\n" +
             "| --- | --- |\n" +
-            "| 网络 / 网络状态 / WiFi 状态 | 建立局域网连接、获取局域网 IP、检测网络 |\n" +
+            "| 网络 / 网络状态 / WiFi 状态 / 修改 WiFi 与网络状态 | 建立局域网连接、获取局域网 IP、检测网络；首页「网络开关」开启 / 关闭 WiFi、移动数据、个人热点（Android 10+ 多数系统禁止 App 直接切换，此时只打开对应系统面板，由你手动操作） |\n" +
+            "| 附近 WiFi 设备（Android 13+）/ 位置（Android 9-12） | 首页显示当前连接的 WiFi 网络名（仅用于识别网络，不定位、不上传；拒绝后只是不显示名字，不影响传输） |\n" +
             "| 前台服务（含 dataSync） | 在后台运行文件服务器、后台下载更新包 |\n" +
             "| 通知 | 显示服务器运行状态、更新下载进度（暂停 / 取消） |\n" +
             "| 相机 | 扫描「扫码连接」二维码（不保存拍摄内容） |\n" +

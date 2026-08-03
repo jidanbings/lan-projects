@@ -2657,9 +2657,11 @@ class Notifications {
 class NetworkStatusUI {
 
     constructor() {
+        // 不再用 navigator.onLine 判断离线：本 App 主打「无外网也能用」，
+        // 热点 / 纯局域网下 navigator.onLine 为 false 是正常现象，不应提示「已离线」。
+        // 服务器是否可达应以 WebSocket 是否连上为准（见 network.js）。
         Events.on('offline', _ => this._showOfflineMessage());
         Events.on('online', _ => this._showOnlineMessage());
-        if (!navigator.onLine) this._showOfflineMessage();
     }
 
     _showOfflineMessage() {

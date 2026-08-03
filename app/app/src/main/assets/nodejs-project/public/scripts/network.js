@@ -74,7 +74,10 @@ class ServerConnection {
 
     _connect() {
         clearTimeout(this._reconnectTimer);
-        if (this._isConnected() || this._isConnecting() || this._isOffline()) return;
+        // 不能以 navigator.onLine 判断是否连接：服务器就是本页同源，
+        // 纯局域网 / 热点（无外网）时 navigator.onLine 为 false 但本地服务器可达，
+        // 以前这里会因 _isOffline() 直接 return，导致配对 / 公共房间被误拦。
+        if (this._isConnected() || this._isConnecting()) return;
         if (this._isReconnect) {
             Events.fire('notify-user', {
                 message: Localization.getTranslation("notifications.connecting"),
@@ -349,10 +352,6 @@ class ServerConnection {
 
     _isConnecting() {
         return this._socket && this._socket.readyState === this._socket.CONNECTING;
-    }
-
-    _isOffline() {
-        return !navigator.onLine;
     }
 
     _onError(e) {

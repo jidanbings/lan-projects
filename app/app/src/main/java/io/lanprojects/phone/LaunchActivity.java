@@ -1,12 +1,18 @@
 package io.lanprojects.phone;
 
+import android.Manifest;
 import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Bundle;
+import android.text.SpannableString;
+import android.text.Spanned;
+import android.text.style.ForegroundColorSpan;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
@@ -15,6 +21,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 
 import com.journeyapps.barcodescanner.ScanContract;
 import com.journeyapps.barcodescanner.ScanOptions;
@@ -36,6 +43,15 @@ import java.util.List;
  *                        pair with a device, or enter a public room.
  */
 public class LaunchActivity extends AppCompatActivity {
+
+    /** Last detected network state, used by the copy button and the toggles. */
+    private NetworkStatus currentStatus;
+
+    /** Requests the SSID permission (NEARBY_WIFI_DEVICES on 13+, location on 9-12). */
+    private boolean wifiNamePermRequested = false;
+    private final ActivityResultLauncher<String> wifiNamePermLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestPermission(),
+                    granted -> refreshNetwork());
 
     /**
      * Scan a QR code -> join its server as a client. The scanned content may be
@@ -73,15 +89,15 @@ public class LaunchActivity extends AppCompatActivity {
         setContentView(R.layout.activity_launch);
 
         // Same edge-to-edge handling as MainActivity: extend into the cutout and
-        // keep white icons over the dark background.
+        // keep dark icons over the light background.
         if (Build.VERSION.SDK_INT >= 28) {
             getWindow().getAttributes().layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
         }
         WindowInsetsControllerCompat insetsController =
                 WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
-        insetsController.setAppearanceLightStatusBars(false);
-        insetsController.setAppearanceLightNavigationBars(false);
+        insetsController.setAppearanceLightStatusBars(true);
+        insetsController.setAppearanceLightNavigationBars(true);
 
         View root = findViewById(R.id.launchRoot);
         ViewCompat.setOnApplyWindowInsetsListener(root, (v, windowInsets) -> {
@@ -90,29 +106,30 @@ public class LaunchActivity extends AppCompatActivity {
             return WindowInsetsCompat.CONSUMED;
         });
 
-        // Show the full server URL (not the bare IP) so the address can be
-        // opened directly in a browser or forwarded to a friend as-is.
-        refreshIpStatus();
+        // Show the current network type / name / IP (WiFi / mobile data /
+        // hotspot) so the address can be opened directly in a browser or
+        // forwarded to a friend as-is.
+        refreshNetwork();
 
-        // Pull down at the top of the home screen to re-read the LAN address
+        // Pull down at the top of the home screen to re-read the network state
         // (the IP changes when switching WiFi networks). The custom
         // PullRefreshLayout drags the page down with the finger and shows a
         // spinner (a native SwipeRefreshLayout cannot be added - the build
         // machine is offline, so the behaviour is reimplemented).
         ((PullRefreshLayout) findViewById(R.id.launchRoot)).setOnRefresh(() -> {
-            refreshIpStatus();
-            Toast.makeText(this, "已刷新局域网地址", Toast.LENGTH_SHORT).show();
+            refreshNetwork();
+            Toast.makeText(this, "已刷新网络状态", Toast.LENGTH_SHORT).show();
         });
 
         // Copy the full server URL (http://<ip>:3000) so it can be pasted into
         // a browser or sent to a friend on the LAN.
         findViewById(R.id.btnCopyIp).setOnClickListener(v -> {
-            String lan = MainActivity.getLanIpAddress();
-            if (lan == null) {
+            String ip = currentStatus == null ? null : currentStatus.ip;
+            if (ip == null) {
                 Toast.makeText(this, "未检测到局域网地址，请检查网络连接", Toast.LENGTH_SHORT).show();
                 return;
             }
-            String url = "http://" + lan + ":3000";
+            String url = "http://" + ip + ":3000";
             ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
             cm.setPrimaryClip(ClipData.newPlainText("lan-projects 局域网地址", url));
             Toast.makeText(this, "已复制：" + url, Toast.LENGTH_SHORT).show();
@@ -139,6 +156,25 @@ public class LaunchActivity extends AppCompatActivity {
             qrScanLauncher.launch(options);
         });
 
+        // Network switches: flip WiFi / mobile data / personal hotspot. The
+        // helpers try the direct toggle first; only when the system rejects it
+        // do they open the matching panel (onResume then refreshes on return).
+        findViewById(R.id.btnWifi).setOnClickListener(v -> {
+            NetworkStatus s = NetworkStatus.detect(this);
+            NetworkStatus.toggleWifi(this, !s.wifiOn);
+            refreshNetworkLater();
+        });
+        findViewById(R.id.btnMobile).setOnClickListener(v -> {
+            NetworkStatus s = NetworkStatus.detect(this);
+            NetworkStatus.toggleMobileData(this, !s.mobileOn);
+            refreshNetworkLater();
+        });
+        findViewById(R.id.btnHotspot).setOnClickListener(v -> {
+            NetworkStatus s = NetworkStatus.detect(this);
+            NetworkStatus.toggleHotspot(this, !s.hotspotOn);
+            refreshNetworkLater();
+        });
+
 
         findViewById(R.id.recentClear).setOnClickListener(v -> {
             DeviceHistory.clear(this);
@@ -155,6 +191,9 @@ public class LaunchActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        // Refresh network state: the user may have flipped the WiFi / data /
+        // hotspot switches in the system panel while we were paused.
+        refreshNetwork();
         // Show the persisted "recently connected" servers (managed via the
         // 清空 button). The list survives returning from a transfer session.
         refreshRecent();
@@ -179,16 +218,98 @@ public class LaunchActivity extends AppCompatActivity {
         ServerLog.log(this, "首页已显示：已清历史、尝试杀掉服务器");
     }
 
-    /** Re-read the LAN address and refresh the status card (URL + dot + label). */
-    private void refreshIpStatus() {
-        String ip = MainActivity.getLanIpAddress();
+    /** Re-read the network type / name / IP and refresh the whole status block. */
+    private void refreshNetwork() {
+        currentStatus = NetworkStatus.detect(this);
+        updateStatusCard(currentStatus);
+        updateToggleButtons(currentStatus);
+        // WiFi 网络名（SSID）需要额外权限：Android 13+ 用 NEARBY_WIFI_DEVICES，
+        // Android 9-12 用位置权限；只在确实连着 WiFi 时才去申请。
+        if (currentStatus.kind == NetworkStatus.Kind.WIFI) ensureWifiNamePermission();
+    }
+
+    /** Direct toggles change the state asynchronously; refresh once it settles. */
+    private void refreshNetworkLater() {
+        findViewById(R.id.launchRoot).postDelayed(this::refreshNetwork, 1500);
+    }
+
+    private void updateStatusCard(NetworkStatus s) {
+        String conn;
+        int color;
+        switch (s.kind) {
+            case WIFI:
+                conn = s.name != null ? "已连接 WiFi「" + s.name + "」" : "已连接 WiFi";
+                color = 0xFF4CAF50; // 连接状态用醒目的绿色
+                break;
+            case MOBILE:
+                conn = "正在使用移动数据";
+                color = 0xFF4CAF50;
+                break;
+            case HOTSPOT:
+                conn = "已开启个人热点";
+                color = 0xFF4CAF50;
+                break;
+            default:
+                conn = "未连接网络";
+                color = 0xFF78909C;
+        }
+        TextView tvConn = findViewById(R.id.connectionText);
+        tvConn.setText(conn);
+        tvConn.setTextColor(color);
+        findViewById(R.id.statusDot).setBackgroundResource(
+                s.kind == NetworkStatus.Kind.NONE
+                        ? R.drawable.bg_dot_offline : R.drawable.bg_dot_online);
         ((TextView) findViewById(R.id.lanIp)).setText(
-                ip == null ? "未知" : "http://" + ip + ":3000");
-        View statusDot = findViewById(R.id.statusDot);
-        statusDot.setBackgroundResource(
-                ip == null ? R.drawable.bg_dot_offline : R.drawable.bg_dot_online);
-        ((TextView) findViewById(R.id.connectionText)).setText(
-                ip == null ? "未连接网络" : "局域网已连接");
+                s.ip == null ? "未知" : "http://" + s.ip + ":3000");
+
+        // 启动按钮下方的红色提示，按当前网络类型告诉对方如何连上本机。
+        TextView hostHint = findViewById(R.id.hostHint);
+        switch (s.kind) {
+            case WIFI:
+                hostHint.setText("连接同一 WiFi 才能进行传输");
+                break;
+            case MOBILE:
+            case HOTSPOT:
+                hostHint.setText("需要连接本台设备的热点");
+                break;
+            default:
+                hostHint.setText("本机当服务器，其他设备扫码加入");
+        }
+    }
+
+    private void updateToggleButtons(NetworkStatus s) {
+        setToggle(R.id.btnWifi, "WiFi", s.wifiOn);
+        setToggle(R.id.btnMobile, "移动数据", s.mobileOn);
+        setToggle(R.id.btnHotspot, "个人热点", s.hotspotOn);
+    }
+
+    /** 紧凑一行开关：图标在上，下方「WiFi / 已开启」；开启 = 绿色，关闭 = 深灰
+        （浅色主题下不再用白色作关闭态——白字在浅灰背景上会看不见，改用深灰）。 */
+    private void setToggle(int id, String label, boolean on) {
+        Button b = findViewById(id);
+        int stateColor = on ? 0xFF4CAF50 : 0xFF78909C; // 开启绿 / 关闭深灰
+        String state = on ? "已开启" : "已关闭";
+        String text = label + "\n" + state;
+        SpannableString ss = new SpannableString(text);
+        ss.setSpan(new ForegroundColorSpan(stateColor),
+                label.length() + 1, text.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        b.setText(ss);
+        b.setCompoundDrawableTintList(ColorStateList.valueOf(stateColor));
+    }
+
+    private void ensureWifiNamePermission() {
+        if (wifiNamePermRequested) return;
+        String perm = Build.VERSION.SDK_INT >= 33
+                ? Manifest.permission.NEARBY_WIFI_DEVICES
+                : Manifest.permission.ACCESS_FINE_LOCATION;
+        if (checkSelfPermission(perm) != PackageManager.PERMISSION_GRANTED) {
+            wifiNamePermRequested = true;
+            if (Build.VERSION.SDK_INT < 33) {
+                Toast.makeText(this, "读取 WiFi 网络名需要位置权限（仅用于显示名称）",
+                        Toast.LENGTH_LONG).show();
+            }
+            wifiNamePermLauncher.launch(perm);
+        }
     }
 
     /** Show the list of previously connected servers (tap to reconnect). */
@@ -207,15 +328,15 @@ public class LaunchActivity extends AppCompatActivity {
         for (final String url : history) {
             TextView row = new TextView(this);
             row.setText(url);
-            row.setTextColor(0xFFECEFF1);
+            row.setTextColor(0xFF263238);
             row.setTextSize(14);
             row.setPadding(12, 12, 12, 12);
             row.setTextIsSelectable(false);
-            // Dark card matching the launch screen's theme.
+            // Light card matching the launch screen's light theme.
             GradientDrawable bg = new GradientDrawable();
-            bg.setColor(0x1AFFFFFF);
+            bg.setColor(0xFFFFFFFF);
             bg.setCornerRadius(12);
-            bg.setStroke(1, 0x22FFFFFF);
+            bg.setStroke(1, 0xFFD9DEE3);
             row.setBackground(bg);
 
             row.setOnClickListener(v -> {

@@ -2,12 +2,14 @@
     <style name="Theme.LanProjects" parent="Theme.AppCompat.Light.NoActionBar">
         <item name="colorPrimary">#3367d6</item>
         <item name="colorPrimaryDark">#2854b0</item>
-        <!-- Dark everywhere so the top status strip merges with the app's own
-             dark top bar, even on Android 15 (targetSdk 35) where edge-to-edge
-             makes both system bars transparent. -->
-        <item name="android:windowBackground">#263238</item>
-        <item name="android:statusBarColor">#263238</item>
-        <item name="android:navigationBarColor">#263238</item>
+        <!-- Light gray everywhere, matching every page's own #ECEFF1 background
+             (settings / about / privacy / logs / speed test / launch / transfer
+             top bar). The system bars are transparent under edge-to-edge on
+             Android 15 (targetSdk 35), so this also avoids a dark flash before
+             each page's background draws. -->
+        <item name="android:windowBackground">#ECEFF1</item>
+        <item name="android:statusBarColor">#ECEFF1</item>
+        <item name="android:navigationBarColor">#ECEFF1</item>
     </style>
 
     <!-- Scanner theme: dark, black system bars. Hide zxing's default viewfinder

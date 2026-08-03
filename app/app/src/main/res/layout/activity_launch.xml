@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Launch screen (App 首页): dark theme, unified with MainActivity's top bar
-     and the app theme (#263238 family). Structure kept identical so all view
-     IDs used by LaunchActivity still resolve; only the visuals changed. -->
+<!-- Launch screen (App 首页): light theme, unified with the settings page's
+     #ECEFF1 family (dark text #212121, blue accent #1565C0, hairlines
+     #D9DEE3). Structure kept identical so all view IDs used by LaunchActivity
+     still resolve; only the visuals changed. -->
 <io.lanprojects.phone.PullRefreshLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/launchRoot"
     android:layout_width="match_parent"
@@ -17,7 +18,7 @@
         android:layout_height="36dp"
         android:layout_gravity="top|center_horizontal"
         android:layout_marginTop="16dp"
-        android:indeterminateTint="#82B1FF"
+        android:indeterminateTint="#1565C0"
         android:visibility="gone" />
 
     <ScrollView
@@ -31,7 +32,7 @@
             android:layout_height="wrap_content"
             android:gravity="center_horizontal"
             android:orientation="vertical"
-            android:padding="24dp">
+            android:padding="20dp">
 
             <!-- Hero: title / tagline / version badge (no app icon - the user
                  does not want the launcher icon repeated on the opening screen) -->
@@ -40,8 +41,8 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="0dp"
                 android:text="lan-projects"
-                android:textColor="#FFFFFF"
-                android:textSize="30sp"
+                android:textColor="#212121"
+                android:textSize="28sp"
                 android:textStyle="bold" />
 
             <TextView
@@ -49,7 +50,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
                 android:text="局域网文件共享 · 端对端加密"
-                android:textColor="#90A4AE"
+                android:textColor="#78909C"
                 android:textSize="14sp" />
 
             <TextView
@@ -62,14 +63,14 @@
                 android:paddingTop="3dp"
                 android:paddingRight="12dp"
                 android:paddingBottom="3dp"
-                android:textColor="#B0BEC5"
+                android:textColor="#78909C"
                 android:textSize="11sp" />
 
             <!-- Status card: connection dot + LAN address + copy -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="26dp"
+                android:layout_marginTop="18dp"
                 android:background="@drawable/bg_status_card"
                 android:orientation="vertical"
                 android:padding="18dp">
@@ -92,18 +93,22 @@
                         android:layout_height="wrap_content"
                         android:layout_marginStart="8dp"
                         android:text="未连接网络"
-                        android:textColor="#B0BEC5"
+                        android:textColor="#78909C"
                         android:textSize="12sp" />
                 </LinearLayout>
 
                 <TextView
                     android:id="@+id/lanIp"
-                    android:layout_width="wrap_content"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="12dp"
+                    android:autoSizeMaxTextSize="20sp"
+                    android:autoSizeMinTextSize="12sp"
+                    android:autoSizeStepGranularity="1sp"
+                    android:autoSizeTextType="uniform"
+                    android:maxLines="1"
                     android:text="获取中…"
-                    android:textColor="#FFFFFF"
-                    android:textIsSelectable="true"
+                    android:textColor="#263238"
                     android:textSize="20sp"
                     android:textStyle="bold" />
 
@@ -119,7 +124,7 @@
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
                         android:text="复制地址发给朋友，或粘贴到浏览器打开"
-                        android:textColor="#90A4AE"
+                        android:textColor="#78909C"
                         android:textSize="12sp" />
 
                     <Button
@@ -135,43 +140,154 @@
                         android:paddingRight="14dp"
                         android:paddingBottom="6dp"
                         android:text="复制地址"
-                        android:textColor="#B0BEC5"
+                        android:textColor="#1565C0"
                         android:textSize="12sp" />
                 </LinearLayout>
             </LinearLayout>
+
+            <!-- Network switches: one compact row (WiFi / mobile data /
+                 personal hotspot) that adapts to small screens. The helpers try
+                 the direct toggle first and only open the system panel when
+                 the OS rejects it. -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:text="网络开关"
+                android:textColor="#78909C"
+                android:textSize="14sp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnWifi"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="8dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_btn_outline"
+                    android:drawableTop="@drawable/ic_net_wifi"
+                    android:drawableTint="#78909C"
+                    android:drawablePadding="4dp"
+                    android:gravity="center"
+                    android:minHeight="0dp"
+                    android:minWidth="0dp"
+                    android:paddingLeft="4dp"
+                    android:paddingTop="8dp"
+                    android:paddingRight="4dp"
+                    android:paddingBottom="8dp"
+                    android:text="WiFi\n检测中"
+                    android:textColor="#78909C"
+                    android:textSize="11sp" />
+
+                <Button
+                    android:id="@+id/btnMobile"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:layout_marginEnd="8dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_btn_outline"
+                    android:drawableTop="@drawable/ic_net_mobile"
+                    android:drawableTint="#78909C"
+                    android:drawablePadding="4dp"
+                    android:gravity="center"
+                    android:minHeight="0dp"
+                    android:minWidth="0dp"
+                    android:paddingLeft="4dp"
+                    android:paddingTop="8dp"
+                    android:paddingRight="4dp"
+                    android:paddingBottom="8dp"
+                    android:text="移动数据\n检测中"
+                    android:textColor="#78909C"
+                    android:textSize="11sp" />
+
+                <Button
+                    android:id="@+id/btnHotspot"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_btn_outline"
+                    android:drawableTop="@drawable/ic_net_hotspot"
+                    android:drawableTint="#78909C"
+                    android:drawablePadding="4dp"
+                    android:gravity="center"
+                    android:minHeight="0dp"
+                    android:minWidth="0dp"
+                    android:paddingLeft="4dp"
+                    android:paddingTop="8dp"
+                    android:paddingRight="4dp"
+                    android:paddingBottom="8dp"
+                    android:text="个人热点\n检测中"
+                    android:textColor="#78909C"
+                    android:textSize="11sp" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="点击直接开启 / 关闭；若系统禁止 App 切换，会打开对应系统面板"
+                android:textColor="#78909C"
+                android:textSize="11sp" />
 
             <!-- Primary action: host mode -->
             <Button
                 android:id="@+id/btnHost"
                 android:layout_width="match_parent"
-                android:layout_height="70dp"
-                android:layout_marginTop="24dp"
+                android:layout_height="52dp"
+                android:layout_marginTop="16dp"
                 android:background="@drawable/bg_btn_primary"
                 android:gravity="center"
-                android:lineSpacingExtra="2dp"
-                android:text="📱 用本设备作为启动\n本机当服务器，其他设备扫码加入"
+                android:text="📱 用本设备作为启动"
                 android:textColor="#FFFFFF"
-                android:textSize="16sp"
+                android:textSize="15sp"
                 android:textStyle="bold" />
+
+            <!-- 启动按钮下方的红色提示：按当前网络类型提示对方如何连上本机。 -->
+            <TextView
+                android:id="@+id/hostHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center"
+                android:text="本机当服务器，其他设备扫码加入"
+                android:textColor="#D32F2F"
+                android:textSize="12sp" />
 
             <!-- Secondary action: scan a connect QR -->
             <Button
                 android:id="@+id/btnScan"
                 android:layout_width="match_parent"
-                android:layout_height="60dp"
-                android:layout_marginTop="14dp"
+                android:layout_height="48dp"
+                android:layout_marginTop="10dp"
                 android:background="@drawable/bg_btn_secondary"
                 android:gravity="center"
-                android:lineSpacingExtra="2dp"
-                android:text="📷 扫码连接\n扫对方二维码：连接 / 配对 / 加入房间"
-                android:textColor="#ECEFF1"
-                android:textSize="14sp" />
+                android:text="📷 扫码连接"
+                android:textColor="#263238"
+                android:textSize="13sp" />
+
+            <!-- 扫码按钮下方的红色提示。 -->
+            <TextView
+                android:id="@+id/scanHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center"
+                android:text="扫对方二维码：连接 / 配对 / 加入房间"
+                android:textColor="#D32F2F"
+                android:textSize="12sp" />
 
             <!-- Recent connections -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="28dp"
+                android:layout_marginTop="20dp"
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
@@ -180,7 +296,7 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:text="最近连接"
-                    android:textColor="#90A4AE"
+                    android:textColor="#78909C"
                     android:textSize="14sp" />
 
                 <TextView
@@ -189,7 +305,7 @@
                     android:layout_height="wrap_content"
                     android:padding="4dp"
                     android:text="清空"
-                    android:textColor="#82B1FF"
+                    android:textColor="#1565C0"
                     android:textSize="13sp" />
             </LinearLayout>
 
@@ -212,11 +328,11 @@
             <!-- Bottom breathing room -->
             <View
                 android:layout_width="match_parent"
-                android:layout_height="28dp" />
+                android:layout_height="20dp" />
         </LinearLayout>
     </ScrollView>
 
-    <!-- Settings, floating top-right over the dark gradient. -->
+    <!-- Settings, floating top-right over the light page. -->
     <Button
         android:id="@+id/btnSettings"
         android:layout_width="wrap_content"
@@ -232,6 +348,6 @@
         android:paddingRight="14dp"
         android:paddingBottom="8dp"
         android:text="⚙ 设置"
-        android:textColor="#ECEFF1"
+        android:textColor="#1565C0"
         android:textSize="12sp" />
 </io.lanprojects.phone.PullRefreshLayout>

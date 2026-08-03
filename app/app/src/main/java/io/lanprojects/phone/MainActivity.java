@@ -9,6 +9,7 @@ import android.content.pm.Signature;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.net.Uri;
+import android.text.TextUtils;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
@@ -123,7 +124,7 @@ public class MainActivity extends AppCompatActivity {
 
         // Android 15 (targetSdk 35) forces edge-to-edge: both system bars become
         // transparent and our content is drawn behind them. Extend the window into
-        // the display cutout (punch-hole camera) so the dark top strip covers it,
+        // the display cutout (punch-hole camera) so the light top strip covers it,
         // then pad by the system-bar insets so nothing is hidden underneath.
         if (Build.VERSION.SDK_INT >= 28) {
             getWindow().getAttributes().layoutInDisplayCutoutMode =
@@ -131,9 +132,9 @@ public class MainActivity extends AppCompatActivity {
         }
         WindowInsetsControllerCompat insetsController =
                 WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
-        // Dark background behind both bars -> keep the icons light (white).
-        insetsController.setAppearanceLightStatusBars(false);
-        insetsController.setAppearanceLightNavigationBars(false);
+        // Light background behind both bars -> keep the icons dark.
+        insetsController.setAppearanceLightStatusBars(true);
+        insetsController.setAppearanceLightNavigationBars(true);
 
         View root = findViewById(R.id.root);
         ViewCompat.setOnApplyWindowInsetsListener(root, (v, windowInsets) -> {
@@ -552,21 +553,34 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
+        // Compact dialog: a small QR (240dp), the address on one line and a
+        // short hint, so the popup stays tight even on small screens.
         ImageView iv = new ImageView(this);
         iv.setImageBitmap(qr);
+        iv.setLayoutParams(new LinearLayout.LayoutParams(240, 240));
+
+        TextView addr = new TextView(this);
+        addr.setText(url);
+        addr.setTextColor(0xFF78909C);
+        addr.setTextSize(11);
+        addr.setGravity(Gravity.CENTER);
+        addr.setPadding(0, 12, 0, 0);
+        addr.setMaxLines(1);
+        addr.setEllipsize(TextUtils.TruncateAt.MIDDLE);
 
         TextView tv = new TextView(this);
-        tv.setText("地址: " + url + "\n对方用「扫码连接」扫这个码即可加入");
-        tv.setTextColor(Color.WHITE);
-        tv.setTextSize(14);
+        tv.setText("对方用「扫码连接」扫这个码即可加入");
+        tv.setTextColor(0xFF263238);
+        tv.setTextSize(12);
         tv.setGravity(Gravity.CENTER);
-        tv.setPadding(0, 16, 0, 0);
+        tv.setPadding(0, 6, 0, 0);
 
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
         layout.setGravity(Gravity.CENTER);
-        layout.setPadding(24, 24, 24, 24);
+        layout.setPadding(16, 16, 16, 16);
         layout.addView(iv);
+        layout.addView(addr);
         layout.addView(tv);
 
         new AlertDialog.Builder(this)
