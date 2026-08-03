@@ -1,7 +1,16 @@
 @echo off
 rem lan-projects 电脑端启动脚本
-rem 共享的 Node 项目在 ..\web（package.json + server\），这里切过去再启动。
-cd /d "%~dp0..\web" || (
+rem 共享的 Node 项目在 web（package.json + server\），这里切过去再启动。
+rem 兼容两种布局：
+rem   1) 仓库内：desktop\start.bat，web 在 ..\web
+rem   2) 发布包内：start.bat 与 web\ 同级
+if exist "%~dp0web" (
+    cd /d "%~dp0web"
+) else (
+    cd /d "%~dp0..\web"
+)
+if errorlevel 1 (
+    echo [ERROR] 找不到 web 目录，请确认 start.bat 与 web 的相对位置。
     pause
     exit /b 1
 )

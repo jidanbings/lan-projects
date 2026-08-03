@@ -23,12 +23,23 @@ xcopy /y /e /q "web\*" "%STAGE%\web\" >nul
 copy /y "desktop\start.bat" "%STAGE%\start.bat" >nul
 
 echo [PACKAGE] zipping -^> %ZIP%
+rem 先删旧包，避免本次压缩失败时把上次的包误当成新产物（否则存在性判断失真）
+del /q "%ZIP%" 2>nul
 powershell -NoProfile -Command "Compress-Archive -Path '%STAGE%' -DestinationPath '%ZIP%' -Force"
+if errorlevel 1 (
+    echo [FAILED] 打包失败（Compress-Archive 报错）。
+    rd /s /q "%STAGE%"
+    pause
+    exit /b 1
+)
 
 if exist "%ZIP%" (
     echo [OK] PC package generated: %ZIP%
 ) else (
     echo [FAILED] zip was not created.
+    rd /s /q "%STAGE%"
+    pause
+    exit /b 1
 )
 rd /s /q "%STAGE%"
 pause

@@ -47,11 +47,13 @@ public class LaunchActivity extends AppCompatActivity {
             registerForActivityResult(new ScanContract(), result -> {
                 String contents = result.getContents();
                 if (contents != null && !contents.isEmpty()) {
-                    String target = normalizeTarget(contents);
+                    String target = LanTargets.normalizeTarget(contents);
                     if (target != null) {
                         startMain(MainActivity.MODE_CLIENT, target);
                     } else {
-                        Toast.makeText(this, "无法识别的二维码", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(this,
+                                "无法识别的二维码：仅支持局域网服务器的 http 连接码 / 配对码 / 房间码",
+                                Toast.LENGTH_SHORT).show();
                     }
                 }
             });
@@ -216,7 +218,18 @@ public class LaunchActivity extends AppCompatActivity {
             bg.setStroke(1, 0x22FFFFFF);
             row.setBackground(bg);
 
-            row.setOnClickListener(v -> startMain(MainActivity.MODE_CLIENT, url));
+            row.setOnClickListener(v -> {
+                // History may predate the strict scan validation and hold a
+                // malicious URL; re-validate before loading, drop it if invalid.
+                String valid = LanTargets.normalizeTarget(url);
+                if (valid == null) {
+                    DeviceHistory.remove(this, url);
+                    Toast.makeText(this, "已移除无效的历史记录", Toast.LENGTH_SHORT).show();
+                    refreshRecent();
+                    return;
+                }
+                startMain(MainActivity.MODE_CLIENT, valid);
+            });
             row.setOnLongClickListener(v -> {
                 DeviceHistory.remove(this, url);
                 refreshRecent();
@@ -237,23 +250,6 @@ public class LaunchActivity extends AppCompatActivity {
         i.putExtra(MainActivity.EXTRA_MODE, mode);
         if (target != null) i.putExtra(MainActivity.EXTRA_TARGET, target);
         startActivity(i);
-    }
-
-    /** Turn a scanned value into a URL to load, or null if invalid. */
-    private String normalizeTarget(String input) {
-        if (input == null || input.isEmpty()) return null;
-        String a = input.trim();
-        // A scanned QR may be a full URL carrying ?pair_key= or ?room_id=
-        // (pairing code / public-room code). Keep such URLs intact so the web
-        // UI's evaluateUrlParams can act on the param. A plain connect QR is
-        // just http://host:port/ and loads normally.
-        if (a.matches("^https?://.*")) return a;
-        // Otherwise a bare host[:port] address (typed manually) -> build URL.
-        if (a.endsWith("/")) a = a.substring(0, a.length() - 1);
-        // host or host:port - allow IPv4, hostnames and bracketed IPv6
-        if (!a.matches("^[a-zA-Z0-9._:\\-\\[\\]]+$")) return null;
-        if (!a.contains(":")) a = a + ":3000";   // default port
-        return "http://" + a + "/";
     }
 
     /** Block the app and tell the user this is not an official build. */

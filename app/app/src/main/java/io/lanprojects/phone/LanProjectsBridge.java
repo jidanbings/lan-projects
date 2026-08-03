@@ -11,11 +11,15 @@ import android.provider.MediaStore;
 import android.util.Base64;
 import android.util.Log;
 import android.webkit.JavascriptInterface;
+import android.webkit.WebView;
 import android.widget.Toast;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.OutputStream;
+import java.util.Collection;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /**
  * JS bridge the bundled web UI uses to save received files on the phone.
@@ -30,6 +34,8 @@ public class LanProjectsBridge {
     private static final String TAG = "LanProjectsBridge";
 
     private final Context context;
+    private final WebView webView;
+    private final Collection<String> ownHosts;
     private OutputStream currentStream;
     private Uri currentUri;
     private File currentFile;
@@ -42,13 +48,22 @@ public class LanProjectsBridge {
     // name instead of a URL-derived garbage one like http___192.168.0.26_...
     private String pendingFileName;
 
-    public LanProjectsBridge(Context context) {
+    /**
+     * @param webView   the WebView this bridge is injected into, used to check
+     *                  the current page origin before allowing file writes.
+     * @param ownHosts  the app's own server host(s) - pages served by this
+     *                  phone are always trusted even on unusual networks.
+     */
+    public LanProjectsBridge(Context context, WebView webView, Collection<String> ownHosts) {
         this.context = context.getApplicationContext();
+        this.webView = webView;
+        this.ownHosts = ownHosts;
     }
 
     /** Called by the web UI immediately before clicking a download anchor. */
     @JavascriptInterface
     public void setPendingFileName(String name) {
+        if (!isTrustedPage()) return;
         pendingFileName = name;
     }
 
@@ -61,6 +76,7 @@ public class LanProjectsBridge {
 
     @JavascriptInterface
     public void startBlobSave(String filename, String mime, long totalSize) {
+        if (!isTrustedPage()) return;
         try {
             currentFilename = sanitize(filename);
             currentExpectedSize = totalSize;
@@ -139,6 +155,32 @@ public class LanProjectsBridge {
         deleteCurrent();
         ServerLog.log(context, "✗ 保存失败: " + currentFilename + " " + msg);
         toast("✗ 保存失败: " + (msg == null ? "" : msg));
+    }
+
+    /**
+     * Only pages served by a lan-projects server on the LAN (or by this app's
+     * own server) may use the file-writing bridge. A malicious page that
+     * somehow loads in the WebView must not be able to drop files into the
+     * Downloads folder, so refuse the call unless the current page origin is
+     * trusted. Runs on the UI thread (WebView is not thread-safe).
+     */
+    private boolean isTrustedPage() {
+        if (webView == null) return false;
+        final boolean[] ok = {false};
+        final CountDownLatch latch = new CountDownLatch(1);
+        webView.post(() -> {
+            try {
+                ok[0] = LanTargets.isTrustedPageOrigin(webView.getUrl(), ownHosts);
+            } finally {
+                latch.countDown();
+            }
+        });
+        try {
+            latch.await(2, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            return false;
+        }
+        return ok[0];
     }
 
     /** Remove the half-written file/MediaStore entry. */

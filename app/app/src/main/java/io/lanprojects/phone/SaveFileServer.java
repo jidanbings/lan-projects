@@ -16,6 +16,7 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URLDecoder;
+import java.util.Collection;
 
 /**
  * Tiny local HTTP server (main process) that receives a received-file blob as a
@@ -37,11 +38,18 @@ public class SaveFileServer {
     private static final int PORT = 3900;
 
     private final Context context;
+    private final Collection<String> ownHosts;
     private ServerSocket serverSocket;
     private Thread acceptThread;
 
-    public SaveFileServer(Context context) {
+    /**
+     * @param ownHosts the app's own server host(s); requests whose Origin is
+     *                 this phone's own server are accepted even on unusual
+     *                 networks without a private-range IP.
+     */
+    public SaveFileServer(Context context, Collection<String> ownHosts) {
         this.context = context.getApplicationContext();
+        this.ownHosts = ownHosts;
     }
 
     public void start() {
@@ -93,6 +101,16 @@ public class SaveFileServer {
                 }
             }
             String header = head.toString();
+            // Only LAN lan-projects pages may save files here. A page that
+            // somehow loads in the WebView must not be able to drop files into
+            // Downloads, so reject requests whose Origin is not a trusted LAN
+            // origin (browser requests always send Origin; requests without one
+            // are allowed for backwards compatibility).
+            String origin = headerValue(header, "Origin:");
+            if (origin != null && !LanTargets.isTrustedPageOrigin(origin, ownHosts)) {
+                respond(out, 403, "Forbidden");
+                return;
+            }
             // The web UI's fetch() is cross-origin (page on :3000 -> POST to
             // :3900). A Blob body has a non-safelisted Content-Type, so the
             // browser sends an OPTIONS preflight first; answer it with CORS
@@ -229,6 +247,16 @@ public class SaveFileServer {
         byte[] buf = new byte[64 * 1024];
         int n;
         while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+    }
+
+    /** Read a header line's value from the raw request head, or null. */
+    private static String headerValue(String header, String key) {
+        int idx = header.toLowerCase().indexOf(key.toLowerCase());
+        if (idx < 0) return null;
+        int lineEnd = header.indexOf("\r\n", idx);
+        if (lineEnd < 0) return null;
+        String value = header.substring(idx + key.length(), lineEnd).trim();
+        return value.isEmpty() ? null : value;
     }
 
     private static String param(String query, String key, String def) {

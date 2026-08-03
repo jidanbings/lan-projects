@@ -46,6 +46,8 @@ import java.net.Inet4Address;
 import java.security.MessageDigest;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 
 /**
@@ -79,6 +81,11 @@ public class MainActivity extends AppCompatActivity {
 
     private String mode;
     private String targetUrl;
+
+    /** The app's own server host(s): pages this phone serves are always
+     *  trusted even on networks without a private-range IP (carrier NAT etc.).
+     *  Populated in onCreate; passed to the file-writing bridges. */
+    private final Collection<String> ownHosts = new ArrayList<>();
 
     private final ActivityResultLauncher<String[]> pickFilesLauncher =
             registerForActivityResult(new ActivityResultContracts.OpenMultipleDocuments(), uris -> {
@@ -151,15 +158,22 @@ public class MainActivity extends AppCompatActivity {
         s.setOffscreenPreRaster(true);
         webView.setBackgroundColor(Color.WHITE);
 
+        // The app's own server host is always trusted by the file bridges (in
+        // case the phone is on a network without a private-range IP).
+        String selfIp = getLanIpAddress();
+        if (selfIp != null && !selfIp.isEmpty()) ownHosts.add(selfIp);
+
         // Bridge used by the injected blob-download routine. Kept as a field so
         // the DownloadListener can ask it for the real filename the web UI set
-        // just before triggering the download.
-        lanProjectsBridge = new LanProjectsBridge(this);
+        // just before triggering the download. The bridge only accepts calls
+        // from trusted LAN lan-projects pages (see LanProjectsBridge).
+        lanProjectsBridge = new LanProjectsBridge(this, webView, ownHosts);
         webView.addJavascriptInterface(lanProjectsBridge, "LanProjectsBridge");
 
         // Local HTTP server that received blobs are POSTed to as raw binary and
         // streamed straight to Downloads (fast, no JS-bridge base64 bottleneck).
-        saveFileServer = new SaveFileServer(this);
+        // Only LAN lan-projects origins may POST to it (see SaveFileServer).
+        saveFileServer = new SaveFileServer(this, ownHosts);
         saveFileServer.start();
 
         // Native file picker for <input type="file"> so the phone can send files.
@@ -224,7 +238,26 @@ public class MainActivity extends AppCompatActivity {
 
     /** Host mode: run the in-app server and load its UI. */
     private void setupHost() {
-        webView.setWebViewClient(new WebViewClient());
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                // Only LAN lan-projects pages stay in the WebView; anything else
+                // (a link or redirect to a public site) opens in the browser.
+                return MainActivity.this.shouldOpenExternally(request);
+            }
+
+            @Override
+            public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                super.onPageStarted(view, url, favicon);
+                // Safety net: server-side redirects do not always reach
+                // shouldOverrideUrlLoading. Never let a non-LAN page become the
+                // main frame - stop it and hand it to the system browser.
+                if (!MainActivity.this.isTrustedMainFrameUrl(url)) {
+                    view.stopLoading();
+                    MainActivity.this.openExternal(url);
+                }
+            }
+        });
 
         String lanIp = getLanIpAddress();
         String ipText = lanIp == null ? "未知" : lanIp;
@@ -302,6 +335,24 @@ public class MainActivity extends AppCompatActivity {
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                // Same rule as host mode: LAN lan-projects pages stay in the
+                // WebView; a link or redirect to a public site opens in the
+                // system browser instead of replacing the app UI.
+                return MainActivity.this.shouldOpenExternally(request);
+            }
+
+            @Override
+            public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                super.onPageStarted(view, url, favicon);
+                // Same redirect safety net as host mode.
+                if (!MainActivity.this.isTrustedMainFrameUrl(url)) {
+                    view.stopLoading();
+                    MainActivity.this.openExternal(url);
+                }
+            }
+
+            @Override
             public void onPageFinished(WebView view, String url) {
                 statusText.setText("已连接：\n" + url);
                 // Remember the server so the launch screen offers it as a quick
@@ -320,6 +371,40 @@ public class MainActivity extends AppCompatActivity {
         });
 
         webView.loadUrl(target);
+    }
+
+    /**
+     * Decide where a WebView navigation goes. Main-frame navigations to a
+     * trusted lan-projects page (LAN host or this phone's own server) load in
+     * the WebView; any other http(s) target - e.g. a public website a link or
+     * redirect points at - opens in the system browser so no external page
+     * ever becomes the app's WebView frame (and never sees LanProjectsBridge).
+     */
+    private boolean shouldOpenExternally(WebResourceRequest request) {
+        if (request == null || !request.isForMainFrame()) return false;
+        String url = request.getUrl().toString();
+        if (isTrustedMainFrameUrl(url)) return false;
+        if (url.startsWith("http://") || url.startsWith("https://")) {
+            return openExternal(url);
+        }
+        return false;
+    }
+
+    /** Open a URL in the system browser; returns false if nothing handled it. */
+    private boolean openExternal(String url) {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** True if a URL may become the WebView's main frame (LAN lan-projects
+     *  page, this phone's own server, or about:blank teardown). */
+    private boolean isTrustedMainFrameUrl(String url) {
+        return url == null || url.startsWith("about:")
+                || LanTargets.isTrustedPageOrigin(url, ownHosts);
     }
 
     /** Extract a sensible filename from the download request. */
