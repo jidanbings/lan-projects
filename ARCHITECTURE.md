@@ -10,7 +10,8 @@
 
 - **无账号、无云端、无公网依赖**——同一局域网内即可用；
 - **一台设备就能当服务器**（Android App 内嵌 Node.js），其他设备用浏览器扫码/输码连接；
-- **三端共用同一份前端代码**，行为一致。
+- **三端共用同一份前端代码**，行为一致；
+- **运行要求**：Android App 需 **Android 9.0（API 28）及以上 + 64 位 ARM（arm64-v8a）**（`targetSdk 35` 不是版本上限，Android 15 / 16 实测可用，更高版本向后兼容）；电脑端需 **Node.js ≥ 18**（Windows / macOS / Linux 均可，Windows 双击 `start.bat` 即可）。
 
 ---
 

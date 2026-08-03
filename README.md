@@ -51,6 +51,30 @@ lan-projects 有两种用法，任选其一：
 
 ---
 
+## 系统要求
+
+**📱 Android App（手机即服务器）**
+
+| 项目 | 要求 |
+|------|------|
+| 系统版本 | **Android 9.0（API 28）及以上**，无上限；`targetSdk 35`，Android 15 / 16 实测可用，更高的系统版本向后兼容 |
+| 处理器 | **64 位 ARM（arm64-v8a）**——Android 9+ 的绝大多数手机都满足，极少数低端 32 位设备除外 |
+| 安装方式 | 直接安装 `lan-projects-vX.X.X-release.apk`，无需电脑 |
+
+> 低于 Android 9，或 32 位处理器的设备**无法安装**；App 只打 `arm64-v8a` 一个架构，安装包更小。`targetSdk` 不是版本上限，新系统照常运行，只是不会触发更新系统的强制行为变更。
+
+**💻 电脑端（桌面服务器 / 浏览器连接）**
+
+| 系统 | 能否使用 | 怎么跑 |
+|------|----------|--------|
+| **Windows 10 / 11**（64 位） | ✅ 推荐 | 双击 `desktop\start.bat`，自动装依赖并启动 |
+| **macOS** | ✅ | 装 [Node.js ≥ 18](https://nodejs.org/) 后 `cd web && npm install && npm start` |
+| **Linux** | ✅ | 同上（需 Node.js ≥ 18） |
+
+> 电脑端统一要求 **Node.js ≥ 18（64 位）**；浏览器打开 `http://局域网IP:3000` 即可互传，桌面浏览器还支持 WebRTC 直连（不过服务器中继）。
+
+---
+
 ## 启动
 
 ### 电脑端
@@ -162,6 +186,13 @@ lan-projects/
 ```
 
 > **web/** 是 App 和电脑端**共享的唯一代码源**：电脑端 `desktop\start.bat` 直接跑它，Android 打包时由开发机上的 `build-apk.bat`（仓库外）同步进 assets。
+
+---
+
+## 更新记录
+
+- 每次发布的功能 / 修复 / 安全更新，详情请见 **[更新文档](https://github.com/jidanbings/lan-projects/blob/main/updatelog.md)**。
+- App 内「设置 → **检查更新**」可一键查询并安装最新版本（国内直连 GitHub 不通时自动走加速代理下载）。
 
 ---
 
