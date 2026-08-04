@@ -2,13 +2,18 @@ package io.lanprojects.phone;
 
 import android.Manifest;
 import android.app.AlertDialog;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.Signature;
 import android.graphics.Bitmap;
 import android.graphics.Color;
+import android.graphics.PixelFormat;
 import android.net.Uri;
+import android.provider.Settings;
 import android.text.TextUtils;
 import android.os.Build;
 import android.os.Bundle;
@@ -80,6 +85,13 @@ public class MainActivity extends AppCompatActivity {
     private LanProjectsBridge lanProjectsBridge;
     private SaveFileServer saveFileServer;
 
+    /** Whether we already guided the user to grant SYSTEM_ALERT_WINDOW once. */
+    private boolean overlayPermissionPrompted;
+    /** Transparent overlay carrying FLAG_KEEP_SCREEN_ON while the file picker is
+     *  open, so the screen cannot time out and drop the peer's connection. */
+    private WindowManager windowManager;
+    private View keepScreenOnView;
+
     private String mode;
     private String targetUrl;
 
@@ -90,16 +102,155 @@ public class MainActivity extends AppCompatActivity {
 
     private final ActivityResultLauncher<String[]> pickFilesLauncher =
             registerForActivityResult(new ActivityResultContracts.OpenMultipleDocuments(), uris -> {
+                ServerLog.log(this, "文件选择器返回: " + (uris == null ? "null" : uris.size() + " 个文件"));
+                // The picker is closed: drop the keep-screen-on overlay, normal
+                // screen timeout resumes.
+                hideKeepScreenOnOverlay();
                 if (filePathCallback != null) {
                     filePathCallback.onReceiveValue(uris.toArray(new Uri[0]));
                     filePathCallback = null;
                 }
             });
 
+    /**
+     * Logs screen on/off to server.log so we can pin down the "选择文件超过
+     * 10~35 秒就断联" root cause: the theory is the server phone's screen times
+     * out behind the system file picker (FLAG_KEEP_SCREEN_ON stops working once
+     * this Activity is stopped), and the hotspot radio then drops the peer's
+     * TCP connection. The screen-off timestamp vs. the server.log SOCKET-CLOSE
+     * line confirms or refutes it. Registered in onCreate, unregistered in
+     * onDestroy (not onPause: the screen turns off exactly while the file
+     * picker has paused this Activity).
+     */
+    private BroadcastReceiver screenReceiver;
+
+    private void registerScreenReceiver() {
+        try {
+            screenReceiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context ctx, Intent intent) {
+                    boolean on = Intent.ACTION_SCREEN_ON.equals(intent.getAction());
+                    ServerLog.log(ctx, "屏幕 " + (on ? "亮" : "灭") + " (传输会话)");
+                }
+            };
+            IntentFilter f = new IntentFilter();
+            f.addAction(Intent.ACTION_SCREEN_OFF);
+            f.addAction(Intent.ACTION_SCREEN_ON);
+            registerReceiver(screenReceiver, f);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void unregisterScreenReceiver() {
+        try {
+            if (screenReceiver != null) {
+                unregisterReceiver(screenReceiver);
+                screenReceiver = null;
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** Launch the system file picker (with the keep-screen-on overlay active). */
+    private void openFilePicker() {
+        showKeepScreenOnOverlay();
+        ServerLog.log(this, "文件选择器打开");
+        pickFilesLauncher.launch(new String[]{"*/*"});
+    }
+
+    /**
+     * One-time guide to grant SYSTEM_ALERT_WINDOW ("显示在其他应用上层"), the
+     * permission behind the keep-screen-on overlay. Called only from
+     * onShowFileChooser when the permission is missing and we haven't prompted
+     * yet. Either way the pending chooser request is cancelled here; the user
+     * taps the peer again to actually pick files (by then the permission is
+     * granted, or the front-end reconnect grace window absorbs the brief drop).
+     */
+    private void showOverlayPermissionDialog() {
+        new AlertDialog.Builder(this)
+                .setTitle("保持屏幕常亮以不断连")
+                .setMessage("选文件时如果屏幕熄灭，热点可能会掐断对方设备的连接。\n\n"
+                        + "需要允许「显示在其他应用上层」，才能在选文件期间保持屏幕常亮。\n"
+                        + "请在接下来的系统设置中开启该权限（只需一次）。")
+                .setCancelable(true)
+                .setPositiveButton("去开启", (d, w) -> {
+                    try {
+                        startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                Uri.parse("package:" + getPackageName())));
+                    } catch (Exception e) {
+                        ServerLog.log(this, "打开悬浮窗授权页失败: " + e);
+                    }
+                    cancelPendingFileChooser();
+                })
+                .setNegativeButton("暂不开启", (d, w) -> cancelPendingFileChooser())
+                .setOnDismissListener(d -> cancelPendingFileChooser())
+                .show();
+    }
+
+    private void cancelPendingFileChooser() {
+        if (filePathCallback != null) {
+            filePathCallback.onReceiveValue(null);
+            filePathCallback = null;
+        }
+    }
+
+    /**
+     * Show a transparent 1x1 overlay carrying FLAG_KEEP_SCREEN_ON while the
+     * system file picker is open. Without it, the picker (a different activity)
+     * stops this Activity, FLAG_KEEP_SCREEN_ON on our window stops working, the
+     * screen times out, and the hotspot radio drops the peer's TCP connection
+     * ("选文件超过 10~35 秒就断联"). An overlay window's flag keeps the screen on
+     * regardless of which activity is on top. Needs SYSTEM_ALERT_WINDOW.
+     */
+    private void showKeepScreenOnOverlay() {
+        try {
+            if (keepScreenOnView != null) return;
+            if (!Settings.canDrawOverlays(this)) return;
+            windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
+            keepScreenOnView = new View(this);
+            keepScreenOnView.setBackgroundColor(Color.TRANSPARENT);
+            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                    1, 1,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                            | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    PixelFormat.TRANSLUCENT);
+            lp.gravity = Gravity.TOP | Gravity.START;
+            windowManager.addView(keepScreenOnView, lp);
+            ServerLog.log(this, "已挂起保持屏幕常亮悬浮层");
+        } catch (Exception e) {
+            ServerLog.log(this, "保持屏幕常亮悬浮层失败: " + e);
+            keepScreenOnView = null;
+        }
+    }
+
+    private void hideKeepScreenOnOverlay() {
+        try {
+            if (keepScreenOnView != null && windowManager != null) {
+                windowManager.removeView(keepScreenOnView);
+                ServerLog.log(this, "已移除保持屏幕常亮悬浮层");
+            }
+        } catch (Exception ignored) {
+        }
+        keepScreenOnView = null;
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+        // Keep the screen on for the whole transfer session (host AND client).
+        // Without this, the RECEIVING phone's screen times out while it waits
+        // for the sender to pick files, Android background-locks its app, and
+        // the system closes its WebSocket — the "收文件的手机自动断开" bug. The
+        // screen stays on until the user leaves the transfer page, so the
+        // connection is never backgrounded. (The front-end also has a JS
+        // NoSleep during active transfers; this native flag covers the whole
+        // session including the idle "selecting files" wait.)
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         webView = findViewById(R.id.webView);
         statusText = findViewById(R.id.statusText);
@@ -186,7 +337,26 @@ public class MainActivity extends AppCompatActivity {
                     filePathCallback.onReceiveValue(null);
                 }
                 filePathCallback = callback;
-                pickFilesLauncher.launch(new String[]{"*/*"});
+
+                // 根治「选文件超过 10~35 秒就断联」：文件选择器打开时本 Activity
+                // 被暂停、FLAG_KEEP_SCREEN_ON 失效，一旦息屏，热点无线电就会掐断
+                // 对方设备的 TCP 连接。解决办法是选文件期间挂一个 1x1 透明悬浮窗
+                // （FLAG_KEEP_SCREEN_ON）强制不熄屏，需要「显示在其他应用上层」
+                // 权限。首次没权限时先引导授权一次，之后自动生效。
+                if (!Settings.canDrawOverlays(MainActivity.this)) {
+                    if (!overlayPermissionPrompted) {
+                        overlayPermissionPrompted = true;
+                        getSharedPreferences("keep_screen_on", MODE_PRIVATE)
+                                .edit().putBoolean("prompted", true).apply();
+                        showOverlayPermissionDialog();
+                    } else {
+                        // 已被提示过但没授权：本次照常打开选择器，前端重连宽限窗兜底
+                        openFilePicker();
+                    }
+                    return true;
+                }
+
+                openFilePicker();
                 return true;
             }
 
@@ -229,6 +399,30 @@ public class MainActivity extends AppCompatActivity {
                 != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 100);
         }
+
+        // Keep this process (and the WebView/WebSocket inside it) alive for the
+        // whole transfer session, host AND client mode. Without this the main
+        // process has no foreground component, so the moment the system file
+        // picker opens the app is backgrounded and Android can freeze/kill it,
+        // tearing down the connection ("选择文件时自动断开"). The service is
+        // stopped in onDestroy.
+        try {
+            Intent hostSession = new Intent(this, HostSessionService.class);
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(hostSession);
+            } else {
+                startService(hostSession);
+            }
+        } catch (Exception e) {
+            ServerLog.log(this, "启动保持连接服务失败: " + e);
+        }
+
+        // Diagnose the "选择文件超过 10~35 秒就断联" bug: log screen on/off so
+        // server.log shows whether the screen went dark behind the file picker
+        // right before the peer's SOCKET-CLOSE line (see registerScreenReceiver).
+        registerScreenReceiver();
+        overlayPermissionPrompted = getSharedPreferences("keep_screen_on", MODE_PRIVATE)
+                .getBoolean("prompted", false);
 
         if (MODE_CLIENT.equals(mode)) {
             setupClient(targetUrl);
@@ -508,10 +702,11 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * URL the host's own WebView loads. Use the LAN address (not loopback
-     * 127.0.0.1) so this device joins the server's shared IP room alongside
-     * LAN clients and derives the same encryption key; fall back to loopback
-     * only when no LAN address is available.
+     * URL the host's own WebView loads. Use the LAN address (fall back to
+     * loopback only when no LAN address is available). The screen-on overlay
+     * during the file picker (see showKeepScreenOnOverlay) keeps the WiFi /
+     * hotspot radio awake, so the LAN-IP self-connection survives the picker;
+     * the user explicitly prefers the LAN address over loopback here.
      */
     private String serverBase() {
         String ip = getLanIpAddress();
@@ -604,6 +799,18 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        // Stop the keep-alive foreground service started in onCreate. The
+        // process is leaving the transfer page anyway, so it no longer needs
+        // to be protected from backgrounding.
+        try {
+            stopService(new Intent(this, HostSessionService.class));
+        } catch (Exception ignored) {
+        }
+        unregisterScreenReceiver();
+        // Defensive: if the activity is destroyed while the file picker is still
+        // open, drop the keep-screen-on overlay so it never leaks past the page.
+        hideKeepScreenOnOverlay();
+
         // Stop the local save server (its only job is receiving downloads).
         if (saveFileServer != null) {
             saveFileServer.stop();

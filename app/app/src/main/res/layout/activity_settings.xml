@@ -93,6 +93,37 @@
                 android:layout_height="1dp"
                 android:background="#D9DEE3" />
 
+            <!-- 更新日志：从 GitHub 拉取 updatelog.md 渲染（与「检查更新」同款国内加速） -->
+            <LinearLayout
+                android:id="@+id/rowChangelog"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingTop="14dp"
+                android:paddingBottom="14dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="更新日志"
+                    android:textColor="#212121"
+                    android:textSize="15sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="›"
+                    android:textColor="#90A4AE"
+                    android:textSize="20sp" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#D9DEE3" />
+
             <!-- 速度传输 -->
             <LinearLayout
                 android:id="@+id/rowSpeed"
@@ -201,6 +232,37 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:text="隐私与 SDK"
+                    android:textColor="#212121"
+                    android:textSize="15sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="›"
+                    android:textColor="#90A4AE"
+                    android:textSize="20sp" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#D9DEE3" />
+
+            <!-- 已授权的权限：查看 / 开关 App 所需的可管理权限 -->
+            <LinearLayout
+                android:id="@+id/rowPermissions"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingTop="14dp"
+                android:paddingBottom="14dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="已授权的权限"
                     android:textColor="#212121"
                     android:textSize="15sp" />
 

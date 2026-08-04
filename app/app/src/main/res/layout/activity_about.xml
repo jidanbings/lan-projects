@@ -56,7 +56,6 @@
             android:text="加载中…"
             android:textColor="#263238"
             android:textColorLink="#1565C0"
-            android:textIsSelectable="true"
             android:textSize="15sp" />
     </ScrollView>
 </LinearLayout>

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:id="@+id/privacyRoot"
+    android:id="@+id/changelogRoot"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="#ECEFF1"
@@ -15,7 +15,7 @@
         android:paddingBottom="12dp">
 
         <TextView
-            android:id="@+id/btnPrivacyBack"
+            android:id="@+id/btnChangelogBack"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="start|center_vertical"
@@ -31,7 +31,7 @@
             android:gravity="center"
             android:layout_marginStart="72dp"
             android:layout_marginEnd="72dp"
-            android:text="隐私与 SDK"
+            android:text="更新日志"
             android:textColor="#212121"
             android:textSize="17sp"
             android:textStyle="bold" />
@@ -48,7 +48,7 @@
         android:layout_weight="1">
 
         <TextView
-            android:id="@+id/privacyContent"
+            android:id="@+id/changelogContent"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:lineSpacingMultiplier="1.4"

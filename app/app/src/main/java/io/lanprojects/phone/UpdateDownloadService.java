@@ -156,6 +156,13 @@ public class UpdateDownloadService extends Service {
     }
 
     private void complete() {
+        // Remember which version this APK is for, so App.cleanupInstalledUpdateApk()
+        // can delete it on the next launch once that version is actually installed
+        // (the system installer never removes the file itself).
+        if (version != null && !version.isEmpty()) {
+            getSharedPreferences("updater", MODE_PRIVATE)
+                    .edit().putString("downloaded_version", version).apply();
+        }
         installApk(target);
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE);
         stopSelf();

@@ -5,12 +5,60 @@ class ServerConnection {
     // the recipient first (JSON) and the receiver remembers who sent it.
     _pendingBinaryFrom = null;
 
+    // A navigator.connection change was seen while the page was hidden (system
+    // file picker open / screen off) and was deferred. Applied on return to the
+    // foreground by _onVisibilityChange, because a reconnect cannot complete in
+    // a suspended renderer and would just leave the socket dead.
+    _pendingReconnect = false;
+
+    // Client-side heartbeat. The server answers our JSON ping with a pong; if
+    // none arrives within _heartbeatTimeout the server is presumed dead even
+    // though the socket may still report OPEN — a half-open TCP link, e.g. the
+    // host phone returned to its launch screen / exited and the hotspot radio
+    // never delivered the FIN. Without this the other device would keep showing
+    // "connected" until the OS TCP keep-alive gives up minutes later. (The
+    // server's PROTOCOL-level ping is answered by the browser's network stack,
+    // invisible to page JS, so it cannot detect server death.)
+    _heartbeatInterval = 3000;   // send a JSON ping every 3s
+    _heartbeatTimeout = 9000;    // server presumed dead if no pong for 9s
+    _heartbeatTimer = null;
+    _lastPongAt = 0;
+
     constructor() {
-        Events.on('pagehide', _ => this._disconnect());
+        // pagehide fires on background-hide (screen lock, app switcher, system
+        // file picker) AND on real page unload. We must NOT close the WebSocket
+        // here: closing it on a background-hide makes the other device see us
+        // drop, and because the visibility-reconnect below used to be broken, a
+        // phone whose screen locked while it waited for a file stayed
+        // "disconnected" forever. On a real unload the browser closes the
+        // socket itself, so the server still cleans us up via the TCP close.
+        // Events.on('pagehide', _ => this._disconnect());
         Events.on(window.visibilityChangeEvent, _ => this._onVisibilityChange());
 
         if (navigator.connection) {
-            navigator.connection.addEventListener('change', _ => this._reconnect());
+            navigator.connection.addEventListener('change', _ => {
+                // Chrome fires this on rtt/downlink/effectiveType fluctuations
+                // too, not only on network-type switches — so log the details to
+                // spot spurious reconnect triggers (which close+reopen the WS).
+                console.log('[debug] NETCONN change: type='
+                    + (navigator.connection.type || '?')
+                    + ' effectiveType=' + (navigator.connection.effectiveType || '?')
+                    + ' rtt=' + navigator.connection.rtt
+                    + ' downlink=' + navigator.connection.downlink);
+                // While the page is hidden (system file picker open / screen
+                // off) a reconnect cannot complete: the renderer is suspended,
+                // the WS handshake stalls and the socket ends up dead. Defer
+                // it; _onVisibilityChange applies it on return to the
+                // foreground. Without this, a connection-quality blip behind
+                // the file picker tears down a healthy socket and BOTH phones
+                // show disconnected ("选择文件超过 10~35 秒就断联").
+                if (this._isHidden()) {
+                    console.log('[debug] NETCONN change while hidden, deferring reconnect');
+                    this._pendingReconnect = true;
+                    return;
+                }
+                this._reconnect();
+            });
         }
 
         Events.on('room-secrets', e => this.send({ type: 'room-secrets', roomSecrets: e.detail }));
@@ -94,9 +142,59 @@ class ServerConnection {
     }
 
     _onOpen() {
+        console.log('[debug] WS OPEN (peer=' + (sessionStorage.getItem('peer_id') || '?') + ')');
         console.log('WS: server connected');
+        // A reconnect landed within the grace window: cancel the pending
+        // "disconnected" UI event so a brief hotspot/link blip never shows a
+        // disconnect and never tears down the peer list.
+        clearTimeout(this._disconnectedNotifyTimer);
         Events.fire('ws-connected');
+        // (Re)start the client heartbeat: baseline the pong timer and ping the
+        // server from now on. If the server dies later without our noticing
+        // (no close event over a half-open hotspot link), the heartbeat bounds
+        // how long the page keeps showing it as connected.
+        this._lastPongAt = Date.now();
+        this._startHeartbeat();
         if (this._isReconnect) Events.fire('notify-user', Localization.getTranslation("notifications.connected"));
+    }
+
+    /** Start the client heartbeat: send a JSON ping every _heartbeatInterval. */
+    _startHeartbeat() {
+        this._stopHeartbeat();
+        this._heartbeatTimer = setInterval(() => {
+            if (!this._isConnected()) {
+                this._stopHeartbeat();
+                return;
+            }
+            this.send({ type: 'ping' });
+            if (Date.now() - this._lastPongAt > this._heartbeatTimeout) {
+                console.log('[debug] heartbeat timeout: no pong for '
+                    + this._heartbeatTimeout + 'ms, server presumed dead');
+                this._stopHeartbeat();
+                this._onHeartbeatTimeout();
+            }
+        }, this._heartbeatInterval);
+    }
+
+    _stopHeartbeat() {
+        if (this._heartbeatTimer) {
+            clearInterval(this._heartbeatTimer);
+            this._heartbeatTimer = null;
+        }
+    }
+
+    /**
+     * The server did not answer our pings: it is gone even though the socket may
+     * still report OPEN (the dead link never delivered a close). Tear the socket
+     * down and surface the disconnect NOW — no 5s grace, we already waited
+     * _heartbeatTimeout — then reconnect so the page recovers automatically if
+     * the server comes back.
+     */
+    _onHeartbeatTimeout() {
+        this._teardownSocket();
+        this._isReconnect = true;
+        Events.fire('ws-disconnected');
+        this._reconnectTimer = setTimeout(() => this._connect(), 1000);
     }
 
     _onPairDeviceInitiate() {
@@ -177,6 +275,10 @@ class ServerConnection {
             case 'ping':
                 this.send({ type: 'pong' });
                 break;
+            case 'pong':
+                // Reply to our heartbeat ping — proves the server is still alive.
+                this._lastPongAt = Date.now();
+                break;
             case 'display-name':
                 this._onDisplayName(msg);
                 break;
@@ -245,7 +347,7 @@ class ServerConnection {
     send(msg) {
         if (!this._isConnected()) return;
         // Only log important messages (UI already shows file transfers, peer events, etc.)
-        const noisy = ['pong','ws-chunk','ws-chunk-prep','partition','partition-received','progress',
+        const noisy = ['ping','pong','ws-chunk','ws-chunk-prep','partition','partition-received','progress',
             'file-transfer-complete','message-transfer-complete','signal','request','header'];
         if (!noisy.includes(msg.type)) {
             console.log("WS send:", msg)
@@ -333,17 +435,93 @@ class ServerConnection {
     }
 
     _onDisconnect() {
+        // Record whether the page was hidden at the moment the socket closed:
+        // hidden=true means the phone was backgrounded (screen off / app
+        // switcher / file picker) and the WebView got suspended; hidden=false
+        // means the socket died while the page was foreground — a network drop
+        // or the process being frozen by the system.
+        const wasHidden = this._isHidden();
+        console.log('[debug] WS CLOSED, scheduling reconnect'
+            + ' (hidden=' + wasHidden + ')');
         console.log('WS: server disconnected');
-        setTimeout(() => {
+        // Delay the "disconnected" UI state by 5s: if the reconnect (scheduled
+        // for 1s below) lands in time, _onOpen cancels it and the user never
+        // sees a disconnect from a transient link blip. The blip that matters
+        // here is the server phone's hotspot radio dropping the client's TCP
+        // for a second or two while the screen is off behind the system file
+        // picker (WebSocket close code 1006); 1.5s was too short — the peer
+        // list got cleared and the other device "disappeared" even though the
+        // reconnect landed a moment later. Only a genuinely dead link (still
+        // down after 5s) surfaces the disconnected UI.
+        this._disconnectedNotifyTimer = setTimeout(() => {
             this._isReconnect = true;
             Events.fire('ws-disconnected');
-            this._reconnectTimer = setTimeout(() => this._connect(), 1000);
-        }, 100); //delay for 100ms to prevent flickering on page reload
+        }, 5000);
+        this._reconnectTimer = setTimeout(() => this._connect(), 1000);
     }
 
     _onVisibilityChange() {
-        if (window.hiddenProperty) return;
+        // Reconnect when the page becomes visible again (returning from the
+        // system file picker / app switcher / screen unlock). The old code
+        // tested `window.hiddenProperty` — a property-name STRING like 'hidden'
+        // that is always truthy — so it always returned early and this reconnect
+        // path NEVER ran, leaving a backgrounded phone stuck disconnected.
+        // _connect() is a no-op when already connected, so calling it whenever
+        // the page is visible is safe.
+        const hidden = this._isHidden();
+        // Log every visibility transition, hidden included, so the phone's own
+        // log shows whether its page went to the background around a disconnect.
+        console.log('[debug] VISIBILITY ' + (hidden ? 'hidden' : 'visible'));
+        // Tell the server when this page goes hidden / visible (screen off,
+        // app switcher, system file picker). Its log then shows whether a
+        // peer's disconnect coincided with that page being hidden — how we
+        // distinguish a "backgrounded phone's WebView closed the socket" from a
+        // genuine network drop.
+        if (this._isConnected()) {
+            this.send({ type: 'visibility', hidden: hidden });
+        }
+        if (hidden) return;
+        console.log('[debug] VISIBILITY visible, reconnecting if needed');
+        // A navigator.connection change was seen while this page was hidden
+        // (behind the file picker / screen off). The socket may be a stale OPEN
+        // on a dead link or a half-open CONNECTING — do not trust its
+        // readyState, tear it down and start a fresh handshake. We skip the
+        // "disconnected" UI here on purpose: the user is already coming back to
+        // the page, a reconnect flash is just noise.
+        if (this._pendingReconnect) {
+            this._pendingReconnect = false;
+            console.log('[debug] VISIBILITY visible, applying deferred reconnect');
+            this._teardownSocket();
+            this._isReconnect = true;
+            this._connect();
+            return;
+        }
+        // A reconnect started while hidden (the 1s retry timer in _onDisconnect)
+        // can leave the socket stuck in CONNECTING — the handshake cannot finish
+        // in a suspended renderer, and _connect() refuses to run while
+        // _isConnecting() is true. Close it so we start a fresh handshake.
+        if (this._socket && this._socket.readyState === this._socket.CONNECTING) {
+            console.log('[debug] VISIBILITY visible, closing stuck CONNECTING socket');
+            this._teardownSocket();
+        }
         this._connect();
+    }
+
+    /** True while the page is hidden (backgrounded, file picker open, screen off). */
+    _isHidden() {
+        return !!(window.hiddenProperty && document[window.hiddenProperty]);
+    }
+
+    /** Close the current WebSocket without running its onclose handler. */
+    _teardownSocket() {
+        this._stopHeartbeat();
+        if (!this._socket) return;
+        try {
+            this._socket.onclose = null;
+            this._socket.close();
+        } catch (e) {
+        }
+        this._socket = null;
     }
 
     _isConnected() {

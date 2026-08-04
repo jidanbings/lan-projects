@@ -20,6 +20,15 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- HostSessionService holds a partial wake lock for the transfer session so
+         the phone (and its WiFi / hotspot radio) never enters Doze while the
+         user is selecting files — keeps the wireless link to the peer stable. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 根治「选文件超过 10~35 秒就断联」：文件选择器打开时本 Activity 被暂停、
+         FLAG_KEEP_SCREEN_ON 失效，息屏后热点无线电会掐断对方连接。用 1x1 透明
+         悬浮窗（FLAG_KEEP_SCREEN_ON）在选文件期间强制不熄屏，需要此权限。首次
+         选文件时引导用户到系统设置里开启，开启后自动生效。 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- Scanning the connect QR code (zxing capture activity). -->
     <uses-permission android:name="android.permission.CAMERA" />
     <!-- Install an APK downloaded by the built-in update check. -->
@@ -74,10 +83,22 @@
             android:exported="false"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density" />
 
+        <!-- Changelog page: renders updatelog.md (markdown) from GitHub. -->
+        <activity
+            android:name=".ChangelogActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density" />
+
         <!-- Privacy + SDK page: bundled, offline, detailed. Opened from the
              settings screen; never exported to other apps. -->
         <activity
             android:name=".PrivacyActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density" />
+
+        <!-- Permission manager: per-permission privacy details + on/off toggles. -->
+        <activity
+            android:name=".PermissionsActivity"
             android:exported="false"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density" />
 
@@ -99,6 +120,15 @@
         <!-- Foreground download of the update APK (progress / pause / cancel). -->
         <service
             android:name=".UpdateDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Keeps the main process (WebView + WebSocket) alive for the whole
+             transfer session, so opening the system file picker cannot get the
+             host/peer process frozen or killed. Runs in the MAIN process, not
+             the ":node" one. -->
+        <service
+            android:name=".HostSessionService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 

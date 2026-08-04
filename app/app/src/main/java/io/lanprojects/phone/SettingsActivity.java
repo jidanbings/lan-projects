@@ -6,7 +6,6 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.provider.Settings;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.ViewGroup;
@@ -51,7 +50,9 @@ public class SettingsActivity extends AppCompatActivity {
     };
 
     // APK 下载的加速代理前缀（配合 GitHub 直连，构建多条下载地址依次尝试）。
-    private static final String[] DOWNLOAD_PROXIES = {
+    // 也供 GithubContent（关于本软件 / 更新日志 页的 README / updatelog.md 拉取）
+    // 复用——同一组代理、同一处维护，代理域名失效只需改这里。
+    static final String[] DOWNLOAD_PROXIES = {
             "https://ghfast.top/",
             "https://gh.ddlc.top/",
             "https://gh-proxy.com/",
@@ -112,8 +113,14 @@ public class SettingsActivity extends AppCompatActivity {
         findViewById(R.id.rowAbout).setOnClickListener(v ->
                 startActivity(new Intent(this, AboutActivity.class)));
 
+        findViewById(R.id.rowChangelog).setOnClickListener(v ->
+                startActivity(new Intent(this, ChangelogActivity.class)));
+
         findViewById(R.id.rowPrivacy).setOnClickListener(v ->
                 startActivity(new Intent(this, PrivacyActivity.class)));
+
+        findViewById(R.id.rowPermissions).setOnClickListener(v ->
+                startActivity(new Intent(this, PermissionsActivity.class)));
 
         findViewById(R.id.rowUpdate).setOnClickListener(v -> checkForUpdate());
     }
@@ -317,10 +324,9 @@ public class SettingsActivity extends AppCompatActivity {
         int pad = dp(20);
         tv.setPadding(pad, dp(16), pad, dp(16));
         tv.setTextSize(14);
-        tv.setTextIsSelectable(true);
         // Same rich markdown (tables, strikethrough, clickable links) as the
         // About / Privacy pages so GitHub release notes render correctly.
-        MarkdownRenderer.create(this).setMarkdown(tv, markdown);
+        MarkdownRenderer.render(this, tv, markdown);
         scroll.addView(tv);
         // Cap the dialog height so a long changelog doesn't push the buttons off
         // screen; short notes still wrap to their natural height.

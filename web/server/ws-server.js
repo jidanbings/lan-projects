@@ -67,11 +67,19 @@ export default class LanProjectsWsServer {
         // fired pagehide). Without this a closed peer stayed in the room until
         // the keep-alive timed out, so reconnecting from the same device kept
         // adding a fresh entry and the room filled up with stale devices.
-        // (No SOCKET-CLOSE log here: _disconnect always logs DISCONNECT, so
-        // logging both just doubled the noise for the same event.)
-        peer.socket.on('close', () => {
+        // The close code tells us WHY the socket went away: 1000 = clean close
+        // (the page/browser initiated it), 1006 = abnormal (network dropped or
+        // the process was killed — no close frame), 1001 = page navigated away.
+        peer.socket.on('close', (code, reason) => {
+            dlog('SOCKET-CLOSE peer=' + peer.id + ' code=' + code
+                + ' reason=' + reason);
             this._disconnect(peer);
         });
+
+        // Protocol-level pong: a browser/ws client answers a WebSocket ping
+        // frame in its network stack WITHOUT running any page JS, so an idle or
+        // backgrounded page still keeps its connection alive (see _keepAlive).
+        peer.socket.on('pong', () => this._setKeepAliveTimerToNow(peer));
 
         this._keepAlive(peer);
 
@@ -107,6 +115,23 @@ export default class LanProjectsWsServer {
                 break;
             case 'pong':
                 this._setKeepAliveTimerToNow(sender);
+                break;
+            case 'ping':
+                // Client heartbeat: the page pings us so IT can detect a dead
+                // server even when the TCP close never arrives (half-open
+                // hotspot link after this phone exits / is killed). Reply
+                // immediately; also count the ping as liveness so our own
+                // keep-alive budget never reaps a healthy-but-idle peer.
+                this._setKeepAliveTimerToNow(sender);
+                this._send(sender, { type: 'pong' });
+                break;
+            case 'visibility':
+                // Frontend reports its page hidden/visible (screen off, app
+                // switcher, system file picker). Lets the log show whether a
+                // peer's disconnect coincided with that page going hidden, so we
+                // can tell "backgrounded WebView closed the socket" apart from a
+                // genuine network drop.
+                dlog('VISIBILITY peer=' + sender.id + ' hidden=' + message.hidden);
                 break;
             case 'join-ip-room':
                 this._joinIpRoom(sender);
@@ -571,16 +596,23 @@ export default class LanProjectsWsServer {
             };
         }
 
-        // Tolerate a missing heartbeat for 30s (was 5s). On phones the app's
-        // WebView can be backgrounded/throttled for many seconds at a time;
-        // with a 5s budget the server would drop the peer and kill transfers
-        // whenever the user switches apps. 30s still reaps genuinely dead peers.
-        if (Date.now() - this._keepAliveTimers[peer.id].lastBeat > 30 * timeout) {
+        // Reap a peer only after ~10 minutes of silence. Keepalive is now a
+        // PROTOCOL-LEVEL ping (socket.ping() -> the browser auto-answers with a
+        // pong in its network stack, no page JS involved), and the budget is
+        // deliberately generous so a healthy-but-idle connection survives even
+        // when the whole WebView is frozen - e.g. the host phone hidden behind
+        // the system file picker while the user browses files for minutes. A
+        // genuinely dead device (app killed, off WiFi) is still reaped here;
+        // sockets that actually closed are already removed instantly by the
+        // 'close' handler, so this slow budget costs nothing.
+        if (Date.now() - this._keepAliveTimers[peer.id].lastBeat > 600 * timeout) {
             this._disconnect(peer);
             return;
         }
 
-        this._send(peer, { type: 'ping' });
+        if (peer.socket.readyState === peer.socket.OPEN) {
+            peer.socket.ping();
+        }
 
         this._keepAliveTimers[peer.id].timer = setTimeout(() => this._keepAlive(peer), timeout);
     }
