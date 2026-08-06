@@ -1,3 +1,90 @@
+// Pairing/加密协议版本。此版本破坏性变更了配对协议与加密格式（HKDF-SHA256 +
+// ChaCha20-Poly1305 AEAD），旧客户端与新版服务器不得混用。服务器在 ws-config
+// 中下发自己的版本，客户端不符即提示刷新/更新，而不是静默出现怪异行为。
+const LAN_PROTOCOL_VERSION = 2;
+
+// ---------------------------------------------------------------------------
+// 配对密钥助手（零信任服务器：S 永远不出设备）。
+//
+// 128 位配对密钥 S 编码为 RFC 4648 base32（A-Z 与 2-7，无填充）= 26 字符，
+// 只经离网渠道传递（二维码光学传递 / 手动输入），服务器永远见不到 S。服务器
+// 只会见到由 S 单向派生的房间路由 id R = HKDF-SHA256(S, "lan-projects-room-id-v2")，
+// HKDF 单向不可逆，无法从 R 反推 S。
+// ---------------------------------------------------------------------------
+window.LanPairing = {
+    // R（房间 id，64 位十六进制）-> S（26 字符 base32 配对密钥）。
+    // 配对过程中发起方生成 S、加入方获得 S 后先入此内存态，重连时再从持久化
+    // 存储预加载，保证 _updateRoomIds('secret', R) 触发 _initEncryption() 时
+    // 一定能取到 S（而服务器从头到尾不接触 S）。
+    secretMap: new Map(),
+
+    base32Alphabet: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567',
+    base32Regex: /^[A-Z2-7]+$/,
+
+    /** 生成 128 位（16 字节）随机配对密钥 -> 26 字符 base32。 */
+    generateSecret() {
+        const bytes = crypto.getRandomValues(new Uint8Array(16));
+        return this._bytesToBase32(bytes);
+    },
+
+    /** R = HKDF-SHA256(S, info="lan-projects-room-id-v2") -> 64 位十六进制。 */
+    deriveRoomId(secret) {
+        const out = window.CryptoUtil.hkdf(
+            window.CryptoUtil.sha256,
+            new TextEncoder().encode(secret),
+            new Uint8Array(32),                        // zero salt，固定
+            new TextEncoder().encode('lan-projects-room-id-v2'),
+            32);
+        return Array.from(out).map(b => b.toString(16).padStart(2, '0')).join('');
+    },
+
+    /** 会话密钥 key = HKDF-SHA256(S, info="lan-projects-key-v2") -> 32 字节。 */
+    deriveKey(secret) {
+        return window.CryptoUtil.hkdf(
+            window.CryptoUtil.sha256,
+            new TextEncoder().encode(secret),
+            new Uint8Array(32),                        // zero salt，固定
+            new TextEncoder().encode('lan-projects-key-v2'),
+            32);
+    },
+
+    /** 是否形如合法的 26 字符 base32 配对码。 */
+    isValidCode(code) {
+        return typeof code === 'string'
+            && code.length === 26
+            && this.base32Regex.test(code);
+    },
+
+    /** 大写、去连字符/空格、剔除非 base32 字符。粘贴输入也走这里。 */
+    normalizeCode(code) {
+        return (code || '').toUpperCase().replace(/[- ]/g, '').replace(/[^A-Z2-7]/g, '');
+    },
+
+    /** 分组显示，如 "ABCDEFGHI-JKLMNOPQR-STUVWX2"。 */
+    formatCode(code) {
+        return code.match(/.{1,9}/g).join('-');
+    },
+
+    _bytesToBase32(bytes) {
+        // 每 5 位映射一个字符；缓冲不超过 12 位，避免 32 位整型截断。
+        let out = '';
+        let buffer = 0;
+        let bits = 0;
+        for (let i = 0; i < bytes.length; i++) {
+            buffer = (buffer << 8) | bytes[i];
+            bits += 8;
+            while (bits >= 5) {
+                out += this.base32Alphabet[(buffer >>> (bits - 5)) & 31];
+                bits -= 5;
+            }
+        }
+        if (bits > 0) {
+            out += this.base32Alphabet[(buffer << (5 - bits)) & 31];
+        }
+        return out;   // 16 字节 = 128 位 -> 恰好 26 个 base32 字符，无填充
+    }
+};
+
 class ServerConnection {
 
     // Set by a 'ws-chunk-prep' message: the peer id whose binary chunk is next.
@@ -64,7 +151,6 @@ class ServerConnection {
         Events.on('room-secrets', e => this.send({ type: 'room-secrets', roomSecrets: e.detail }));
         Events.on('join-ip-room', _ => this.send({ type: 'join-ip-room'}));
         Events.on('room-secrets-deleted', e => this.send({ type: 'room-secrets-deleted', roomSecrets: e.detail}));
-        Events.on('regenerate-room-secret', e => this.send({ type: 'regenerate-room-secret', roomSecret: e.detail}));
         Events.on('pair-device-initiate', _ => this._onPairDeviceInitiate());
         Events.on('pair-device-join', e => this._onPairDeviceJoin(e.detail));
         Events.on('pair-device-cancel', _ => this.send({ type: 'pair-device-cancel' }));
@@ -117,6 +203,15 @@ class ServerConnection {
 
     _setWsConfig(wsConfig) {
         this._wsConfig = wsConfig;
+        // 协议破坏性版本检查：客户端与服务器必须同为 v2 才能配对/传输。
+        // 老版本服务器不下发 protocolVersion，则跳过（保持向后兼容的启动）。
+        if (wsConfig.protocolVersion && wsConfig.protocolVersion !== LAN_PROTOCOL_VERSION) {
+            console.error('LAN protocol version mismatch: server='
+                + wsConfig.protocolVersion + ' client=' + LAN_PROTOCOL_VERSION);
+            Events.fire('notify-user', {
+                message: '⚠️ 协议版本不匹配，请刷新页面；App 用户请更新到最新版'
+            });
+        }
         Events.fire('ws-config', wsConfig);
     }
 
@@ -202,15 +297,29 @@ class ServerConnection {
             Events.fire('notify-user', Localization.getTranslation("notifications.online-requirement-pairing"));
             return;
         }
-        this.send({ type: 'pair-device-initiate' });
+        // 密钥 S 本地生成，只把派生的房间 id R 发给服务器——服务器永远见不到 S。
+        const secret = window.LanPairing.generateSecret();
+        const roomId = window.LanPairing.deriveRoomId(secret);
+        window.LanPairing.secretMap.set(roomId, secret);
+        this.send({ type: 'pair-device-initiate', roomId: roomId });
+        // 本地事件携带 S，供 UI 展示二维码/配对码。不等服务器应答：恶意服务器
+        // 只能影响配对能否成功，不能影响展示的码的正确性（码是本地生成的）。
+        Events.fire('pair-device-initiated', { roomId: roomId, secret: secret });
     }
 
-    _onPairDeviceJoin(pairKey) {
+    _onPairDeviceJoin(secret) {
         if (!this._isConnected()) {
-            setTimeout(() => this._onPairDeviceJoin(pairKey), 1000);
+            setTimeout(() => this._onPairDeviceJoin(secret), 1000);
             return;
         }
-        this.send({ type: 'pair-device-join', pairKey: pairKey });
+        secret = window.LanPairing.normalizeCode(secret);
+        if (!window.LanPairing.isValidCode(secret)) {
+            Events.fire('notify-user', Localization.getTranslation("notifications.pairing-key-invalid"));
+            return;
+        }
+        const roomId = window.LanPairing.deriveRoomId(secret);
+        window.LanPairing.secretMap.set(roomId, secret);
+        this.send({ type: 'pair-device-join', roomId: roomId });
     }
 
     _onCreatePublicRoom() {
@@ -247,7 +356,7 @@ class ServerConnection {
         }
         msg = JSON.parse(msg);
         // Only log important non-frequent messages (UI already shows the rest)
-        const noisy = ['ping','pong','ws-chunk','ws-chunk-prep','partition','partition-received','progress',
+        const noisy = ['ping','pong','ws-chunk','ws-chunk-prep','e2e','partition','partition-received','progress',
             'file-transfer-complete','message-transfer-complete','peer-joined','peer-left',
             'files-transfer-response','request','header','text','display-name-changed','signal'];
         if (!noisy.includes(msg.type)) {
@@ -283,7 +392,7 @@ class ServerConnection {
                 this._onDisplayName(msg);
                 break;
             case 'pair-device-initiated':
-                Events.fire('pair-device-initiated', msg);
+                // 服务器确认房间创建成功。UI 已收到本地事件（携带 S），此处忽略。
                 break;
             case 'pair-device-joined':
                 Events.fire('pair-device-joined', msg);
@@ -292,16 +401,13 @@ class ServerConnection {
                 Events.fire('pair-device-join-key-invalid');
                 break;
             case 'pair-device-canceled':
-                Events.fire('pair-device-canceled', msg.pairKey);
+                Events.fire('pair-device-canceled');
                 break;
             case 'join-key-rate-limit':
                 Events.fire('notify-user', Localization.getTranslation("notifications.rate-limit-join-key"));
                 break;
             case 'secret-room-deleted':
                 Events.fire('secret-room-deleted', msg.roomSecret);
-                break;
-            case 'room-secret-regenerated':
-                Events.fire('room-secret-regenerated', msg);
                 break;
             case 'public-room-id-invalid':
                 Events.fire('public-room-id-invalid', msg.publicRoomId);
@@ -312,6 +418,11 @@ class ServerConnection {
             case 'public-room-left':
                 Events.fire('public-room-left');
                 break;
+            case 'e2e':
+                // 端到端加密信封（request/header/partition/text/e2e-confirm 的外层
+                // 壳）。与其它 ws-fallback 中继消息一样转发给 Peer 处理：Peer._onMessage
+                // 的 case 'e2e' 会解密并分派内层消息。漏掉这一支会让所有加密信封在
+                // ServerConnection 层被丢弃——文件传输彻底失效而配对仍显示成功。
             case 'request':
             case 'header':
             case 'partition':
@@ -347,7 +458,7 @@ class ServerConnection {
     send(msg) {
         if (!this._isConnected()) return;
         // Only log important messages (UI already shows file transfers, peer events, etc.)
-        const noisy = ['ping','pong','ws-chunk','ws-chunk-prep','partition','partition-received','progress',
+        const noisy = ['ping','pong','ws-chunk','ws-chunk-prep','e2e','partition','partition-received','progress',
             'file-transfer-complete','message-transfer-complete','signal','request','header'];
         if (!noisy.includes(msg.type)) {
             console.log("WS send:", msg)
@@ -385,9 +496,22 @@ class ServerConnection {
 
                 // Only now join rooms
                 Events.fire('join-ip-room');
-                PersistentStorage.getAllRoomSecrets()
-                    .then(roomSecrets => {
-                        Events.fire('room-secrets', roomSecrets);
+                PersistentStorage.getAllRoomSecretEntries()
+                    .then(roomSecretEntries => {
+                        // 预加载 R->S 内存映射，重连后按 R 重派生会话密钥。
+                        // S 只在本地内存/持久化里，服务器永远见不到。
+                        for (const entry of roomSecretEntries) {
+                            if (entry && entry.secret && entry.pair_secret) {
+                                window.LanPairing.secretMap.set(entry.secret, entry.pair_secret);
+                            } else if (entry && entry.secret) {
+                                // 旧格式条目：历史上由服务器签发、无 S 字段，新协议
+                                // 下已无法派生密钥，清理掉避免残留。历史配对需重新配对。
+                                console.log('Removing legacy room secret entry (no pair_secret):', entry.secret);
+                                PersistentStorage.deleteRoomSecret(entry.secret);
+                            }
+                        }
+                        Events.fire('room-secrets',
+                            roomSecretEntries.map(e => e.secret).filter(Boolean));
                     });
             });
 
@@ -581,12 +705,16 @@ class Peer {
         return !!this._roomIds['secret'];
     }
 
+    /**
+     * The 128-bit pairing secret S for this peer's secret room. The server only
+     * ever sees the derived room id R (_roomIds['secret']); S lives in the local
+     * LanPairing.secretMap (populated at pairing time and preloaded on reconnect),
+     * so a compromised server never holds the key material.
+     */
     _getPairSecret() {
-        return this._roomIds['secret'];
-    }
-
-    _regenerationOfPairSecretNeeded() {
-        return this._getPairSecret() && this._getPairSecret().length !== 256
+        const roomId = this._roomIds['secret'];
+        if (!roomId) return null;
+        return window.LanPairing.secretMap.get(roomId) || null;
     }
 
     _getRoomTypes() {
@@ -595,34 +723,25 @@ class Peer {
 
     _updateRoomIds(roomType, roomId) {
         const roomTypeIsSecret = roomType === "secret";
-        const roomIdIsNotPairSecret = this._getPairSecret() !== roomId;
+        const oldPairRoomId = this._roomIds['secret'];
+        const newPairRoomDiffers = oldPairRoomId !== roomId;
 
-        // if peer is another browser tab, peer is not identifiable with roomSecret as browser tabs share all roomSecrets
-        // -> do not delete duplicates and do not regenerate room secrets
+        // 同一 peer 只能对应一个秘密房间。若服务器把此 peer 宣告进一个与既有
+        // 配对不同的秘密房间（错配/重配），删除旧的，保持"一个 peer 一把密钥"。
+        // 同浏览器标签页共享全部 roomSecrets，不判定、不删除。
         if (!this._isSameBrowser()
             && roomTypeIsSecret
-            && this._isPaired()
-            && roomIdIsNotPairSecret) {
-            // multiple roomSecrets with same peer -> delete old roomSecret
+            && oldPairRoomId
+            && newPairRoomDiffers) {
+            // multiple secret rooms with same peer -> delete old roomSecret
             PersistentStorage
-                .deleteRoomSecret(this._getPairSecret())
+                .deleteRoomSecret(oldPairRoomId)
                 .then(deletedRoomSecret => {
                     if (deletedRoomSecret) console.log("Successfully deleted duplicate room secret with same peer: ", deletedRoomSecret);
                 });
         }
 
         this._roomIds[roomType] = roomId;
-
-        if (!this._isSameBrowser()
-            &&  roomTypeIsSecret
-            &&  this._isPaired()
-            &&  this._regenerationOfPairSecretNeeded()
-            &&  this._isCaller) {
-            // increase security by initiating the increase of the roomSecret length
-            // from 64 chars (<v1.7.0) to 256 chars (v1.7.0+)
-            console.log('RoomSecret is regenerated to increase security')
-            Events.fire('regenerate-room-secret', this._getPairSecret());
-        }
 
         // Re-evaluate the encryption key whenever a room is added (e.g. a pairing
         // secret is established after the initial IP room). No-op if already derived.
@@ -645,7 +764,7 @@ class Peer {
         }
 
         PersistentStorage
-            .getRoomSecretEntry(this._getPairSecret())
+            .getRoomSecretEntry(this._roomIds['secret'])
             .then(roomSecretEntry => {
                 const autoAccept = roomSecretEntry
                     ? roomSecretEntry.entry.auto_accept
@@ -673,64 +792,122 @@ class Peer {
     _initEncryption() {
         if (this._keyExchangeDone) return;
         // Security policy: only PAIRED peers may transfer. The E2E key is
-        // derived from the PAIRING SECRET shared only with this peer
-        // (established out-of-band via the pairing QR / 6-digit code, so an
-        // on-network attacker cannot derive it). The dedup in _updateRoomIds
-        // keeps exactly one secret per peer, so both sides hold the same one
-        // and derive the same key - transfers never corrupt.
+        // HKDF-derived from the PAIRING SECRET S shared only with this peer
+        // (established out-of-band via the pairing QR / high-entropy code, so
+        // neither an on-network attacker NOR the relay server can derive it —
+        // the server never sees S). The dedup in _updateRoomIds keeps exactly
+        // one secret per peer, so both sides derive the same key and transfers
+        // never corrupt.
         //
         // Unpaired peers get NO key on purpose: _requireEncryption() then
         // refuses the transfer. There is deliberately no public fallback key.
         const secret = this._getPairSecret();
-        if (secret && secret.length >= 4) {
-            this._deriveKey(secret + 'lan-projects-encryption-salt');
+        if (secret) {
+            this._deriveKey(secret);
         }
     }
 
     _deriveKey(secret) {
-        // Create a 32-byte key from the pairing secret using simple hashing
-        // This works in all browsers (no crypto.subtle dependency)
-        const encoder = new TextEncoder();
-        const data = encoder.encode(secret);
-        const key = new Uint8Array(32);
-        for (let i = 0; i < 32; i++) {
-            let hash = i;
-            for (let j = 0; j < data.length; j++) {
-                hash = ((hash << 5) - hash) + data[j];
-                hash = hash & hash;
-            }
-            key[i] = Math.abs(hash) % 256;
-        }
-        this._encryptionKey = key;
+        // 密码学 KDF：HKDF-SHA256(ikm=S, salt=0, info="lan-projects-key-v2")。
+        // 替换旧的 djb2 风格弱哈希。服务器拿不到 S，因此无法派生同样的 key。
+        this._encryptionKey = window.LanPairing.deriveKey(secret);
         this._keyExchangeDone = true;
         Events.fire('e2e-encryption-active');
         const badge = document.getElementById('e2e-badge');
         if (badge) badge.removeAttribute('hidden');
+
+        // 配对确认握手：双方各自派生密钥后立即发一条 AEAD 加密的 e2e-confirm。
+        // 对端若持不同 S（输错码/被恶意服务器路由进错误房间），解密必失败并
+        // 触发提示，避免在错配状态下默默传文件。认证成功（_onE2e 收到合法
+        // e2e-confirm）即确认密钥一致。
+        this._sendEncrypted('e2e-confirm', { n: Array.from(crypto.getRandomValues(new Uint8Array(8))) });
     }
 
     _encrypt(data) {
         if (!this._encryptionKey) return data;
-        // ChaCha20 stream cipher - strong (TLS 1.3 / WireGuard) and far faster
-        // in pure JS than AES (noble-ciphers, ~12x vs aes-js), which matters on
-        // weak phones for big files. WebCrypto's crypto.subtle is unavailable
-        // on the non-HTTPS LAN origin, so this is the fast pure-JS choice.
-        // A fresh random 12-byte nonce is prefixed to the ciphertext.
+        // ChaCha20-Poly1305 AEAD：加密 + Poly1305 完整性认证（防篡改）。
+        // 流密码本身不含认证，TLS 1.3 同款 AEAD 组合。帧格式：
+        //   nonce(12) ‖ ciphertext ‖ tag(16)
+        // noble-ciphers 的 encrypt() 输出 ct‖tag，前面再拼上随机 nonce。
+        // WebCrypto 的 crypto.subtle 在非 HTTPS 局域网来源不可用，故纯 JS。
         const nonce = crypto.getRandomValues(new Uint8Array(12));
-        const cipher = new Uint8Array(
-            window.Chacha.chacha20(this._encryptionKey, nonce, new Uint8Array(data)));
-        const result = new Uint8Array(nonce.length + cipher.length);
+        const sealed = window.Chacha.chacha20poly1305(this._encryptionKey, nonce)
+            .encrypt(new Uint8Array(data));     // sealed = ciphertext ‖ tag(16)
+        const result = new Uint8Array(12 + sealed.length);
         result.set(nonce);
-        result.set(cipher, nonce.length);
+        result.set(sealed, 12);
         return result.buffer;
     }
 
     _decrypt(data) {
-        if (!this._encryptionKey) return data;
+        // AEAD 解密并校验 tag。认证失败（篡改/密钥不一致/错配）返回 null，
+        // 调用方丢弃该块。不存在"无密钥时原样放行"的旧路径——新协议下所有
+        // 帧都必须可认证。
+        if (!this._encryptionKey) return null;
         const view = new Uint8Array(data);
-        if (view.length < 12) return data;
+        if (view.length < 12 + 16) return null;   // 不够一个合法 AEAD 帧
         const nonce = view.slice(0, 12);
-        const cipher = view.slice(12);
-        return window.Chacha.chacha20(this._encryptionKey, nonce, cipher).buffer;
+        const sealed = view.slice(12);
+        try {
+            return window.Chacha.chacha20poly1305(this._encryptionKey, nonce)
+                .decrypt(sealed).buffer;
+        } catch (e) {
+            console.warn('E2E: AEAD 认证失败（数据被篡改或密钥不一致），丢弃该块', e);
+            Events.fire('notify-user', {
+                message: '⚠️ 密文校验失败，已丢弃。可能密钥不一致或传输被篡改。'
+            });
+            return null;
+        }
+    }
+
+    // ---- Encrypted envelope（元数据 + 配对确认）----------------------------
+    // 敏感 JSON 负载（文件名、大小、聊天文本、offset）在过服务器中继前用会话
+    // AEAD 加密。路由字段（type/to/roomType/roomId）保持明文——服务器必须在不
+    // 解密的前提下路由。接收端 _onE2e 解密后按内层 type 重新分派。
+
+    /** 把一个小 JSON 负载加密成可中继的 {type:'e2e', data:base64} 信封。 */
+    _sendEncrypted(type, payload) {
+        const key = this._requireEncryption();
+        if (!key) return;
+        const inner = { type: type, ...payload };
+        const plaintext = new TextEncoder().encode(JSON.stringify(inner));
+        const nonce = crypto.getRandomValues(new Uint8Array(12));
+        const sealed = window.Chacha.chacha20poly1305(key, nonce).encrypt(plaintext);
+        const frame = new Uint8Array(12 + sealed.length);
+        frame.set(nonce);
+        frame.set(sealed, 12);
+        this.sendJSON({ type: 'e2e', data: arrayBufferToBase64(frame.buffer) });
+    }
+
+    /** 解密收到的 {type:'e2e'} 信封并分派内层消息。 */
+    _onE2e(message) {
+        if (!this._encryptionKey) {
+            console.warn('E2E: received encrypted message but not paired, dropping');
+            return;
+        }
+        let inner;
+        try {
+            const frame = new Uint8Array(base64ToArrayBuffer(message.data));
+            const nonce = frame.slice(0, 12);
+            const sealed = frame.slice(12);
+            const plaintext = window.Chacha.chacha20poly1305(this._encryptionKey, nonce)
+                .decrypt(sealed);
+            inner = JSON.parse(new TextDecoder().decode(plaintext));
+        } catch (e) {
+            // 认证失败 = 密钥不一致或数据被篡改。配对确认握手阶段失败说明对方
+            // 持有不同 S（错配/被恶意服务器路由进错误房间），立即提示。
+            console.warn('E2E: decrypt/verify failed, dropping', e);
+            Events.fire('notify-user', {
+                message: '⚠️ 配对密钥不一致或数据被篡改，已丢弃。请重新配对。'
+            });
+            return;
+        }
+        if (inner.type === 'e2e-confirm') {
+            // 配对确认：对端用相同 S 成功解出我们的确认 —— 密钥一致，进入可传状态。
+            this._e2eConfirmed = true;
+            return;
+        }
+        this._onMessage(JSON.stringify(inner));
     }
 
     /**
@@ -780,7 +957,8 @@ class Peer {
 
         this._filesRequested = files;
 
-        this.sendJSON({type: 'request',
+        // 文件名/大小等元数据 E2E 加密过中继：服务器只见密文，看不到"传了什么"。
+        this._sendEncrypted('request', {
             header: header,
             totalSize: totalSize,
             imagesOnly: imagesOnly,
@@ -805,8 +983,8 @@ class Peer {
     }
 
     async _sendFile(file) {
-        this.sendJSON({
-            type: 'header',
+        // 文件名/大小/mime 加密过中继。
+        this._sendEncrypted('header', {
             size: file.size,
             name: file.name,
             mime: file.type
@@ -818,11 +996,11 @@ class Peer {
     }
 
     _onPartitionEnd(offset) {
-        this.sendJSON({ type: 'partition', offset: offset });
+        this._sendEncrypted('partition', { offset: offset });
     }
 
     _onReceivedPartitionEnd(offset) {
-        this.sendJSON({ type: 'partition-received', offset: offset });
+        this._sendEncrypted('partition-received', { offset: offset });
     }
 
     _sendNextPartition() {
@@ -841,6 +1019,10 @@ class Peer {
         }
         const messageJSON = JSON.parse(message);
         switch (messageJSON.type) {
+            case 'e2e':
+                // 加密信封：解密内层并重新分派（元数据 / 配对确认握手）。
+                this._onE2e(messageJSON);
+                break;
             case 'request':
                 this._onFilesTransferRequest(messageJSON);
                 break;
@@ -1012,7 +1194,8 @@ class Peer {
 
     sendText(text) {
         const unescaped = btoa(unescape(encodeURIComponent(text)));
-        this.sendJSON({ type: 'text', text: unescaped });
+        // 聊天文本也 E2E 加密过中继，服务器看不到内容。
+        this._sendEncrypted('text', { text: unescaped });
     }
 
     _onTextReceived(message) {
@@ -1139,6 +1322,7 @@ class RTCPeer extends Peer {
                 return;
             }
             message = this._decrypt(message);
+            if (message === null) return;   // AEAD 认证失败，丢弃
             super._onMessage(message);
             return;
         }
@@ -1340,7 +1524,6 @@ class PeersManager {
         // peer closes connection
         Events.on('secret-room-deleted', e => this._onSecretRoomDeleted(e.detail));
 
-        Events.on('room-secret-regenerated', e => this._onRoomSecretRegenerated(e.detail));
         Events.on('display-name', e => this._onDisplayName(e.detail.displayName));
         Events.on('self-display-name-changed', e => this._notifyPeersDisplayNameChanged(e.detail));
         Events.on('notify-peer-display-name-changed', e => this._notifyPeerDisplayNameChanged(e.detail));
@@ -1426,6 +1609,7 @@ class PeersManager {
             if (peer._encryptionKey) {
                 data = peer._decrypt(data);
             }
+            if (data === null) return;   // AEAD 认证失败，丢弃
             peer._onMessage(data);
         } else {
             peer._onMessage(message);
@@ -1441,6 +1625,7 @@ class PeersManager {
             return;
         }
         const decrypted = peer._decrypt(data);
+        if (decrypted === null) return;   // AEAD 认证失败，丢弃
         peer._onMessage(decrypted);
     }
 
@@ -1550,15 +1735,6 @@ class PeersManager {
         else {
             Events.fire('peer-disconnected', peerId);
         }
-    }
-
-    _onRoomSecretRegenerated(message) {
-        PersistentStorage
-            .updateRoomSecret(message.oldRoomSecret, message.newRoomSecret)
-            .then(_ => {
-                console.log("successfully regenerated room secret");
-                Events.fire("room-secrets", [message.newRoomSecret]);
-            })
     }
 
     _notifyPeersDisplayNameChanged(newDisplayName) {

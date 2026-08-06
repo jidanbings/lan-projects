@@ -26,7 +26,9 @@ export default class Peer {
         this.requestRate = 0;
 
         this.roomSecrets = [];
-        this.pairKey = null;
+        // 进行中但尚未完成的配对房间 id（R）。配对成功后清空，用于取消配对的
+        // 清理；已配对的秘密房间不受取消影响。
+        this.pendingPairRoom = null;
 
         this.publicRoomId = null;
     }

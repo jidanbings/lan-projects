@@ -20,6 +20,8 @@ echo [PACKAGE] staging %PKG_NAME%
 if exist "%STAGE%" rd /s /q "%STAGE%"
 mkdir "%STAGE%"
 xcopy /y /e /q "web\*" "%STAGE%\web\" >nul
+rem 测试脚本不进发布包（web\tests 是仓库内回归测试，非运行时组件）。
+rd /s /q "%STAGE%\web\tests" 2>nul
 copy /y "desktop\start.bat" "%STAGE%\start.bat" >nul
 
 echo [PACKAGE] zipping -^> %ZIP%

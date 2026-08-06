@@ -8,7 +8,8 @@ import java.util.Collection;
  *
  *  - LaunchActivity's QR scan: a scanned code must resolve to a lan-projects
  *    server on the LAN (plain http, private-range IP / LAN hostname, root path,
- *    only ?pair_key= / ?room_id=), so scanning a QR can never open a website.
+ *    only the query params evaluateUrlParams handles, e.g. ?secret= / ?room_id=),
+ *    so scanning a QR can never open a website.
  *  - MainActivity's WebView navigation: only LAN lan-projects pages load inside
  *    the app's WebView; anything else opens in the system browser.
  *  - LanProjectsBridge / SaveFileServer: only pages from a trusted LAN origin
@@ -57,13 +58,25 @@ final class LanTargets {
             String path = uri.getPath();
             if (path != null && !path.isEmpty() && !"/".equals(path)) return false;
             // Only the query params the web UI's evaluateUrlParams understands.
+            // (main.js evaluateUrlParams: secret / room_id / base64text /
+            // base64zip / share_target[+title+text+url] / file_handler / init.
+            // "pair_key" was the pre-v1.1.0 6-digit pairing param and is gone.)
             String query = uri.getRawQuery();
             if (query != null && !query.isEmpty()) {
                 for (String pair : query.split("&")) {
                     if (pair.isEmpty()) continue;
                     int eq = pair.indexOf('=');
                     String key = eq >= 0 ? pair.substring(0, eq) : pair;
-                    if (!("pair_key".equals(key) || "room_id".equals(key))) return false;
+                    if (!("secret".equals(key)
+                            || "room_id".equals(key)
+                            || "base64text".equals(key)
+                            || "base64zip".equals(key)
+                            || "share_target".equals(key)
+                            || "title".equals(key)
+                            || "text".equals(key)
+                            || "url".equals(key)
+                            || "file_handler".equals(key)
+                            || "init".equals(key))) return false;
                 }
             }
             return true;

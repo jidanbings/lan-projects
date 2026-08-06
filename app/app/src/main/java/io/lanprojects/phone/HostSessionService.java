@@ -37,6 +37,10 @@ public class HostSessionService extends Service {
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
 
+    // WifiLock API 自 API 29 整体过时（createWifiLock / WIFI_MODE_FULL_HIGH_PERF），
+    // 但平台没有提供能"保持 WiFi/热点无线电唤醒"的等价替代，而让无线电不休眠正是
+    // 本服务存在的目的（选文件超时不断连），因此继续使用旧 API 是刻意为之，抑制警告。
+    @SuppressWarnings("deprecation")
     @Override
     public void onCreate() {
         super.onCreate();
@@ -87,6 +91,9 @@ public class HostSessionService extends Service {
         super.onDestroy();
     }
 
+    // 双参 startForeground 自 API 31 过时，但它是 API 29 以下设备唯一可用的形式
+    // （三参带 type 的重载要求 API 29+），且下方已按版本守卫，因此保留并抑制警告。
+    @SuppressWarnings("deprecation")
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (Build.VERSION.SDK_INT >= 29) {

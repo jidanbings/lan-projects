@@ -384,13 +384,10 @@
                     </div>
                     <div class="row center p-2">
                         <div class="column fw">
-                            <div class="input-key-container six-chars" dir="ltr">
-                                <input type="tel" class="textarea center" aria-label="pair-key-char-1" maxlength="1" autocorrect="off" autocomplete="off" autocapitalize="none" spellcheck="false" autofocus contenteditable placeholder disabled>
-                                <input type="tel" class="textarea center" aria-label="pair-key-char-2" maxlength="1" autocorrect="off" autocomplete="off" autocapitalize="none" spellcheck="false" contenteditable placeholder disabled>
-                                <input type="tel" class="textarea center" aria-label="pair-key-char-3" maxlength="1" autocorrect="off" autocomplete="off" autocapitalize="none" spellcheck="false" contenteditable placeholder disabled>
-                                <input type="tel" class="textarea center" aria-label="pair-key-char-4" maxlength="1" autocorrect="off" autocomplete="off" autocapitalize="none" spellcheck="false" contenteditable placeholder disabled>
-                                <input type="tel" class="textarea center" aria-label="pair-key-char-5" maxlength="1" autocorrect="off" autocomplete="off" autocapitalize="none" spellcheck="false" contenteditable placeholder disabled>
-                                <input type="tel" class="textarea center" aria-label="pair-key-char-6" maxlength="1" autocorrect="off" autocomplete="off" autocapitalize="none" spellcheck="false" contenteditable placeholder disabled>
+                            <div class="input-key-container" dir="ltr">
+                                <!-- 高熵配对密钥：26 字符 base32（RFC 4648），支持粘贴；
+                                     大写字母与数字 2-7，连字符/空格自动剥离。 -->
+                                <input type="text" class="textarea center key-input" aria-label="pair-secret-input" maxlength="26" autocorrect="off" autocomplete="off" autocapitalize="none" spellcheck="false" autofocus contenteditable placeholder disabled>
                             </div>
                             <p class="font-subheading center text-center" data-i18n-key="dialogs.enter-key-from-another-device" data-i18n-attrs="text"></p>
                         </div>

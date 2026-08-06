@@ -85,8 +85,6 @@ public class MainActivity extends AppCompatActivity {
     private LanProjectsBridge lanProjectsBridge;
     private SaveFileServer saveFileServer;
 
-    /** Whether we already guided the user to grant SYSTEM_ALERT_WINDOW once. */
-    private boolean overlayPermissionPrompted;
     /** Transparent overlay carrying FLAG_KEEP_SCREEN_ON while the file picker is
      *  open, so the screen cannot time out and drop the peer's connection. */
     private WindowManager windowManager;
@@ -159,21 +157,27 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * One-time guide to grant SYSTEM_ALERT_WINDOW ("显示在其他应用上层"), the
-     * permission behind the keep-screen-on overlay. Called only from
-     * onShowFileChooser when the permission is missing and we haven't prompted
-     * yet. Either way the pending chooser request is cancelled here; the user
-     * taps the peer again to actually pick files (by then the permission is
-     * granted, or the front-end reconnect grace window absorbs the brief drop).
+     * Guide the user to grant SYSTEM_ALERT_WINDOW ("显示在其他应用上层"), the
+     * permission behind the keep-screen-on overlay. Shown EVERY time the file
+     * picker is opened without the permission — declining once must never
+     * silence it forever (that silently reintroduced the "选文件时连接被掐断"
+     * bug: the user didn't realise the consequence, and later file picks just
+     * dropped the connection while browsing for a file). The buttons decide
+     * what happens next: 去开启 -> system settings (pending chooser cancelled,
+     * the user picks again after granting); 暂不开启 / back -> the picker still
+     * opens so the user is never blocked, and the next pick asks again.
      */
     private void showOverlayPermissionDialog() {
+        final boolean[] goingToSettings = {false};
         new AlertDialog.Builder(this)
                 .setTitle("保持屏幕常亮以不断连")
-                .setMessage("选文件时如果屏幕熄灭，热点可能会掐断对方设备的连接。\n\n"
+                .setMessage("选文件时如果屏幕熄灭，热点可能会掐断对方设备的连接，传输就会断开。\n\n"
                         + "需要允许「显示在其他应用上层」，才能在选文件期间保持屏幕常亮。\n"
-                        + "请在接下来的系统设置中开启该权限（只需一次）。")
+                        + "点「去开启」在系统设置里打开（只需一次），以后自动生效；\n"
+                        + "暂时不开启也能继续选文件，但选文件时请尽量别让屏幕熄灭。")
                 .setCancelable(true)
                 .setPositiveButton("去开启", (d, w) -> {
+                    goingToSettings[0] = true;
                     try {
                         startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                                 Uri.parse("package:" + getPackageName())));
@@ -182,8 +186,15 @@ public class MainActivity extends AppCompatActivity {
                     }
                     cancelPendingFileChooser();
                 })
-                .setNegativeButton("暂不开启", (d, w) -> cancelPendingFileChooser())
-                .setOnDismissListener(d -> cancelPendingFileChooser())
+                .setNegativeButton("暂不开启", (d, w) -> {
+                    // Dismiss below opens the picker.
+                })
+                .setOnDismissListener(d -> {
+                    // 去开启 already navigated to settings and cancelled the
+                    // chooser; only open the picker when the user dismissed via
+                    // 暂不开启 / back / outside tap, so they are not blocked.
+                    if (!goingToSettings[0]) openFilePicker();
+                })
                 .show();
     }
 
@@ -342,17 +353,13 @@ public class MainActivity extends AppCompatActivity {
                 // 被暂停、FLAG_KEEP_SCREEN_ON 失效，一旦息屏，热点无线电就会掐断
                 // 对方设备的 TCP 连接。解决办法是选文件期间挂一个 1x1 透明悬浮窗
                 // （FLAG_KEEP_SCREEN_ON）强制不熄屏，需要「显示在其他应用上层」
-                // 权限。首次没权限时先引导授权一次，之后自动生效。
+                // 权限。没权限时每次都弹引导（见 showOverlayPermissionDialog）。
                 if (!Settings.canDrawOverlays(MainActivity.this)) {
-                    if (!overlayPermissionPrompted) {
-                        overlayPermissionPrompted = true;
-                        getSharedPreferences("keep_screen_on", MODE_PRIVATE)
-                                .edit().putBoolean("prompted", true).apply();
-                        showOverlayPermissionDialog();
-                    } else {
-                        // 已被提示过但没授权：本次照常打开选择器，前端重连宽限窗兜底
-                        openFilePicker();
-                    }
+                    // 权限缺失时每次都引导开启，而不是只提示一次就再也不问——以前
+                    // "拒绝一次就不再提醒"，用户不知道后果（选文件期间熄屏 → 连接被
+                    // 掐断），结果在后台选文件时悄悄断开。点「暂不开启」/返回仍照常
+                    // 打开选择器、不阻塞用户，下次选文件会再次引导（见对话框内注释）。
+                    showOverlayPermissionDialog();
                     return true;
                 }
 
@@ -421,8 +428,6 @@ public class MainActivity extends AppCompatActivity {
         // server.log shows whether the screen went dark behind the file picker
         // right before the peer's SOCKET-CLOSE line (see registerScreenReceiver).
         registerScreenReceiver();
-        overlayPermissionPrompted = getSharedPreferences("keep_screen_on", MODE_PRIVATE)
-                .getBoolean("prompted", false);
 
         if (MODE_CLIENT.equals(mode)) {
             setupClient(targetUrl);

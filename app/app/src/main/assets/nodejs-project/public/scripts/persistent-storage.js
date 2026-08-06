@@ -114,7 +114,11 @@ class PersistentStorage {
         })
     }
 
-    static addRoomSecret(roomSecret, displayName, deviceName) {
+    /**
+     * @param roomSecret 房间路由 id R（64 位十六进制，由 S 派生）
+     * @param pairSecret 配对密钥 S（26 字符 base32，只在本地存储，服务器见不到）
+     */
+    static addRoomSecret(roomSecret, pairSecret, displayName, deviceName) {
         return new Promise((resolve, reject) => {
             const DBOpenRequest = window.indexedDB.open('lan_projects_store');
             DBOpenRequest.onsuccess = e => {
@@ -123,6 +127,7 @@ class PersistentStorage {
                 const objectStore = transaction.objectStore('room_secrets');
                 const objectStoreRequest = objectStore.add({
                     'secret': roomSecret,
+                    'pair_secret': pairSecret,
                     'display_name': displayName,
                     'device_name': deviceName,
                     'auto_accept': false
@@ -279,6 +284,7 @@ class PersistentStorage {
                         // Do not use `updatedRoomSecret ?? roomSecretEntry.entry.secret` to ensure compatibility with older browsers
                         const updatedRoomSecretEntry = {
                             'secret': updatedRoomSecret !== undefined ? updatedRoomSecret : roomSecretEntry.entry.secret,
+                            'pair_secret': roomSecretEntry.entry.pair_secret,
                             'display_name': updatedDisplayName !== undefined ? updatedDisplayName : roomSecretEntry.entry.display_name,
                             'device_name': updatedDeviceName !== undefined ? updatedDeviceName : roomSecretEntry.entry.device_name,
                             'auto_accept': updatedAutoAccept !== undefined ? updatedAutoAccept : roomSecretEntry.entry.auto_accept

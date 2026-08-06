@@ -98,6 +98,74 @@ android {
     }
 }
 
+// ------------------------------------------------------------------
+//  Frontend integrity manifest (zero-trust anchor).
+//
+//  build-apk.bat copies web/public -> src/main/assets/nodejs-project/public
+//  BEFORE this task runs. This task SHA-256-hashes every file under that
+//  public/ tree and writes integrity-manifest.json into build/generated,
+//  packaged into the APK as assets/nodejs-project/integrity-manifest.json.
+//  (No leading dot on the name: AGP's asset merger ignores dotfiles.)
+//  Because the APK is signature-verified at install time, the packaged
+//  manifest is an immutable trusted reference: NodeService re-verifies the
+//  on-disk extraction against it at startup and FAILS CLOSED on any
+//  mismatch, so a non-root virus on the host phone cannot swap in tampered
+//  crypto code for the clients it serves.
+// ------------------------------------------------------------------
+def integrityPublicDir = file('src/main/assets/nodejs-project/public')
+
+def sha256Hex = { File f ->
+    def md = java.security.MessageDigest.getInstance('SHA-256')
+    f.withInputStream { is ->
+        byte[] buf = new byte[64 * 1024]
+        int n
+        while ((n = is.read(buf)) != -1) md.update(buf, 0, n)
+    }
+    md.digest().encodeHex().toString()
+}
+
+tasks.register('generateIntegrityManifest') {
+    group = 'lan-projects'
+    description = 'Hashes the bundled frontend (nodejs-project/public) and writes the integrity manifest.'
+    // AGP fills this DirectoryProperty in with build/generated/assets/<taskName>;
+    // the task writes integrity-manifest.json under it, so the file is
+    // packaged into the APK as assets/nodejs-project/integrity-manifest.json.
+    ext.outputDir = objects.directoryProperty()
+    inputs.dir(integrityPublicDir)
+    outputs.dir(ext.outputDir)
+    doLast {
+        def dir = integrityPublicDir
+        if (!dir.isDirectory()) {
+            throw new GradleException(
+                    "Frontend assets not found at ${dir}. Run the web -> assets sync first (build-apk.bat).")
+        }
+        def files = []
+        dir.eachFileRecurse(groovy.io.FileType.FILES) { files.add(it) }
+        files.sort { a, b -> a.path.compareTo(b.path) }
+        def manifest = [
+                format      : 'lan-projects-frontend-integrity-v1',
+                publicFiles : files.collect { f ->
+                    def rel = dir.toPath().relativize(f.toPath()).toString().replace('\\', '/')
+                    [path: rel, sha256: sha256Hex(f)]
+                }
+        ]
+        def out = new File(ext.outputDir.get().asFile, 'nodejs-project/integrity-manifest.json')
+        out.parentFile.mkdirs()
+        out.text = new groovy.json.JsonBuilder(manifest).toPrettyString()
+        logger.lifecycle("Frontend integrity manifest: {} files hashed -> {}", files.size(), out)
+    }
+}
+
+// Pack the generated manifest into the APK's assets for every variant, with
+// the ordering AGP guarantees (generator runs before assets are merged).
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.sources.assets?.addGeneratedSourceDirectory(
+                tasks.named('generateIntegrityManifest'),
+                { it.outputDir })
+    }
+}
+
 // Transitive deps pull mixed kotlin-stdlib versions; unify them.
 configurations.configureEach {
     resolutionStrategy {

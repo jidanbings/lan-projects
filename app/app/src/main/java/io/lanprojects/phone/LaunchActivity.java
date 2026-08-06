@@ -56,8 +56,8 @@ public class LaunchActivity extends AppCompatActivity {
     /**
      * Scan a QR code -> join its server as a client. The scanned content may be
      * a plain connect QR (http://host:port/) or a pairing/room QR carrying
-     * ?pair_key= / ?room_id= - both are loaded as URLs and the web UI's
-     * evaluateUrlParams acts on any query param.
+     * ?secret= (high-entropy pairing key) / ?room_id= - both are loaded as URLs
+     * and the web UI's evaluateUrlParams acts on any query param.
      */
     private final ActivityResultLauncher<ScanOptions> qrScanLauncher =
             registerForActivityResult(new ScanContract(), result -> {

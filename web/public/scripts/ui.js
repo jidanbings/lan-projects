@@ -1339,13 +1339,16 @@ class PairDeviceDialog extends Dialog {
         this.$closeBtn = this.$el.querySelector('[close]')
         this.$pairSubmitBtn = this.$el.querySelector('button[type="submit"]');
 
-        this.inputKeyContainer = new InputKeyContainer(
-            this.$el.querySelector('.input-key-container'),
-            /\d/,
-            () => this.$pairSubmitBtn.removeAttribute('disabled'),
-            () => this.$pairSubmitBtn.setAttribute('disabled', true),
-            () => this._submit()
-        );
+        // 单个文本输入框接收 26 字符 base32 配对码（大写过滤、去连字符、支持
+        // 粘贴）。粘帖也会触发 input 事件，无需单独处理 paste。
+        this.$keyInput = this.$el.querySelector('.input-key-container input');
+        this.$keyInput.addEventListener('input', e => this._onKeyInput(e));
+        this.$keyInput.addEventListener('keydown', e => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                this._submit();
+            }
+        });
 
         this.$pairDeviceHeaderBtn.addEventListener('click', _ => this._pairDeviceInitiate());
         this.$form.addEventListener('submit', e => this._onSubmit(e));
@@ -1354,17 +1357,16 @@ class PairDeviceDialog extends Dialog {
         Events.on('keydown', e => this._onKeyDown(e));
         Events.on('ws-disconnected', _ => this.hide());
         Events.on('pair-device-initiated', e => this._onPairDeviceInitiated(e.detail));
-        Events.on('pair-device-joined', e => this._onPairDeviceJoined(e.detail.peerId, e.detail.roomSecret));
+        Events.on('pair-device-joined', e => this._onPairDeviceJoined(e.detail.peerId));
         Events.on('peers', e => this._onPeers(e.detail));
         Events.on('peer-joined', e => this._onPeerJoined(e.detail));
         Events.on('pair-device-join-key-invalid', _ => this._onPublicRoomJoinKeyInvalid());
-        Events.on('pair-device-canceled', e => this._onPairDeviceCanceled(e.detail));
         Events.on('evaluate-number-room-secrets', _ => this._evaluateNumberRoomSecrets())
         Events.on('secret-room-deleted', e => this._onSecretRoomDeleted(e.detail));
-        this.$el.addEventListener('paste', e => this._onPaste(e));
         this.$qrCode.addEventListener('click', _ => this._copyPairUrl());
 
         this.pairPeer = {};
+        this.pairSecret = null;
     }
 
     _onKeyDown(e) {
@@ -1376,13 +1378,11 @@ class PairDeviceDialog extends Dialog {
         }
     }
 
-    _onPaste(e) {
-        e.preventDefault();
-        let pastedKey = e.clipboardData
-            .getData("Text")
-            .replace(/\D/g,'')
-            .substring(0, 6);
-        this.inputKeyContainer._onPaste(pastedKey);
+    /** 输入时实时过滤：大写、去连字符/空格、剔除非 base32 字符，同步启用提交按钮。 */
+    _onKeyInput(e) {
+        const normalized = window.LanPairing.normalizeCode(e.target.value);
+        e.target.value = normalized;
+        this.$pairSubmitBtn.disabled = !window.LanPairing.isValidCode(normalized);
     }
 
     _pairDeviceInitiate() {
@@ -1390,15 +1390,18 @@ class PairDeviceDialog extends Dialog {
     }
 
     _onPairDeviceInitiated(msg) {
-        this.pairKey = msg.pairKey;
-        this.roomSecret = msg.roomSecret;
+        // 本机生成的配对密钥 S（26 字符 base32）。服务器 ack 只带 roomId，secret
+        // 由本地事件携带或从 secretMap 按 R 取回。
+        this.pairSecret = msg.secret || window.LanPairing.secretMap.get(msg.roomId);
+        this.roomSecret = msg.roomId;
         this._setKeyAndQRCode();
-        this.inputKeyContainer._enableChars();
+        this.$keyInput.removeAttribute('disabled');
         this.show();
     }
 
     _setKeyAndQRCode() {
-        this.$key.innerText = `${this.pairKey.substring(0,3)} ${this.pairKey.substring(3,6)}`
+        // 26 字符 base32 按 9-9-8 分组展示，方便跨设备口头/手抄核对。
+        this.$key.innerText = window.LanPairing.formatCode(this.pairSecret)
 
         // Display the QR code for the url
         const qr = new QRCode({
@@ -1415,8 +1418,10 @@ class PairDeviceDialog extends Dialog {
     }
 
     _getPairUrl() {
+        // QR 内容即本页 URL + 配对密钥 S。扫码后对端自动加入配对（光学带外传递，
+        // 不经过服务器）。
         let url = new URL(location.href);
-        url.searchParams.append('pair_key', this.pairKey)
+        url.searchParams.append('secret', this.pairSecret)
         return url.href;
     }
 
@@ -1436,33 +1441,39 @@ class PairDeviceDialog extends Dialog {
     }
 
     _submit() {
-        let inputKey = this.inputKeyContainer._getInputKey();
-        this._pairDeviceJoin(inputKey);
+        this._pairDeviceJoin(this.$keyInput.value);
     }
 
-    _pairDeviceJoin(pairKey) {
-        if (/^\d{6}$/g.test(pairKey)) {
-            Events.fire('pair-device-join', pairKey);
-            this.inputKeyContainer.focusLastChar();
+    _pairDeviceJoin(code) {
+        code = window.LanPairing.normalizeCode(code);
+        if (window.LanPairing.isValidCode(code)) {
+            this.pairSecret = code;
+            Events.fire('pair-device-join', code);
         }
     }
 
-    _onPairDeviceJoined(peerId, roomSecret) {
+    _onPairDeviceJoined(peerId) {
         // abort if peer is another tab on the same browser and remove room-type from gui
         if (BrowserTabsConnector.peerIsSameBrowser(peerId)) {
             this._cleanUp();
             this.hide();
 
-            Events.fire('room-secrets-deleted', [roomSecret]);
+            if (this.pairSecret) {
+                Events.fire('room-secrets-deleted', [window.LanPairing.deriveRoomId(this.pairSecret)]);
+            }
 
             Events.fire('notify-user', Localization.getTranslation("notifications.pairing-tabs-error"));
             return;
         }
 
-        // save pairPeer and wait for it to connect to ensure both devices have gotten the roomSecret
+        // 服务器不再下发 roomSecret：双方都持 S，本端据此派生 R 用于后续匹配
+        // 服务器宣告的秘密房间 id。
+        const roomId = this.pairSecret
+            ? window.LanPairing.deriveRoomId(this.pairSecret)
+            : null;
         this.pairPeer = {
             "peerId": peerId,
-            "roomSecret": roomSecret
+            "roomSecret": roomId
         };
     }
 
@@ -1500,8 +1511,11 @@ class PairDeviceDialog extends Dialog {
             deviceName = $peer.ui._peer.name.deviceName;
         }
 
+        // 配对密钥 S 只存在于本地内存映射里（服务器见不到）。
+        const pairSecret = window.LanPairing.secretMap.get(roomSecret);
+
         PersistentStorage
-            .addRoomSecret(roomSecret, displayName, deviceName)
+            .addRoomSecret(roomSecret, pairSecret, displayName, deviceName)
             .then(_ => {
                 Events.fire('notify-user', Localization.getTranslation("notifications.pairing-success"));
                 this._evaluateNumberRoomSecrets();
@@ -1530,14 +1544,12 @@ class PairDeviceDialog extends Dialog {
         Events.fire('pair-device-cancel');
     }
 
-    _onPairDeviceCanceled(pairKey) {
-        Events.fire('notify-user', Localization.getTranslation("notifications.pairing-key-invalidated", null, {key: pairKey}));
-    }
-
     _cleanUp() {
         this.roomSecret = null;
-        this.pairKey = null;
-        this.inputKeyContainer._cleanUp();
+        this.pairSecret = null;
+        this.$keyInput.value = '';
+        this.$keyInput.setAttribute('disabled', true);
+        this.$pairSubmitBtn.setAttribute('disabled', true);
         this.pairPeer = {};
     }
 

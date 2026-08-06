@@ -5,6 +5,10 @@ import fs from "fs";
 import Peer from "./peer.js";
 import {hasher, randomizer} from "./helper.js";
 
+// 配对/加密协议版本。此版本破坏性变更了配对协议与加密格式（HKDF-SHA256 +
+// ChaCha20-Poly1305 AEAD），随 ws-config 下发给客户端，旧客户端版本不符会提示。
+const LAN_PROTOCOL_VERSION = 2;
+
 // Append a line to the same server.log the Android app's 查看日志 screen reads
 // (HOME is set to the app's files dir by NodeService). Used to diagnose the
 // "很多设备" bug: whether a fresh server really has an empty room, and whether
@@ -36,7 +40,6 @@ export default class LanProjectsWsServer {
 
         this._rooms = {}; // { roomId: peers[] }
 
-        this._roomSecrets = {}; // { pairKey: roomSecret }
         this._keepAliveTimers = {};
 
         // Fast lookup for routing binary file chunks: peerId -> peer, and
@@ -86,7 +89,8 @@ export default class LanProjectsWsServer {
         this._send(peer, {
             type: 'ws-config',
             wsConfig: {
-                wsFallback: this._conf.wsFallback
+                wsFallback: this._conf.wsFallback,
+                protocolVersion: LAN_PROTOCOL_VERSION
             }
         });
 
@@ -143,16 +147,13 @@ export default class LanProjectsWsServer {
                 this._onRoomSecretsDeleted(sender, message);
                 break;
             case 'pair-device-initiate':
-                this._onPairDeviceInitiate(sender);
+                this._onPairDeviceInitiate(sender, message);
                 break;
             case 'pair-device-join':
                 this._onPairDeviceJoin(sender, message);
                 break;
             case 'pair-device-cancel':
                 this._onPairDeviceCancel(sender);
-                break;
-            case 'regenerate-room-secret':
-                this._onRegenerateRoomSecret(sender, message);
                 break;
             case 'create-public-room':
                 this._onCreatePublicRoom(sender);
@@ -166,6 +167,7 @@ export default class LanProjectsWsServer {
             case 'signal':
                 this._signalAndRelay(sender, message);
                 break;
+            case 'e2e':
             case 'request':
             case 'header':
             case 'partition':
@@ -177,7 +179,10 @@ export default class LanProjectsWsServer {
             case 'text':
             case 'display-name-changed':
             case 'ws-chunk':
-                // relay ws-fallback (legacy text relay, kept for compatibility)
+                // relay ws-fallback. 'e2e' carries the end-to-end encrypted
+                // envelope (file names / sizes / chat text): the server only
+                // routes it, never decrypts it — the key is held by the two
+                // peers alone and never crosses this server.
                 if (this._conf.wsFallback) {
                     this._signalAndRelay(sender, message);
                 }
@@ -243,8 +248,7 @@ export default class LanProjectsWsServer {
         dlog('DISCONNECT peer=' + sender.id + ' ip=' + sender.ip
             + ' remainingIpRoom=' + (this._rooms[this._ipRoomId()] ? Object.keys(this._rooms[this._ipRoomId()]).length : 0));
 
-        this._removePairKey(sender.pairKey);
-        sender.pairKey = null;
+        sender.pendingPairRoom = null;
 
         this._cancelKeepAlive(sender);
         delete this._keepAliveTimers[sender.id];
@@ -294,21 +298,20 @@ export default class LanProjectsWsServer {
         }
     }
 
-    _onPairDeviceInitiate(sender) {
-        let roomSecret = randomizer.getRandomString(256);
-        let pairKey = this._createPairKey(sender, roomSecret);
+    // 零信任配对：服务器只按客户端派生的房间 id R 登记/路由，永远不生成、
+    // 不签发、不接触配对密钥 S。双方凭带外交换的 S 派生同一个 R，服务器无从
+    // 从 R 反推 S（HKDF 单向）。恶意服务器最多能把加入方路由进错误的房间，
+    // 但对方没有 S 派生不出同一会话密钥，AEAD 配对确认握手立即失败。
 
-        if (sender.pairKey) {
-            this._removePairKey(sender.pairKey);
+    _onPairDeviceInitiate(sender, message) {
+        const roomId = message.roomId;
+        if (!roomId || !/^[0-9a-f]{64}$/.test(roomId)) {
+            this._send(sender, { type: 'pair-device-join-key-invalid' });
+            return;
         }
-        sender.pairKey = pairKey;
-
-        this._send(sender, {
-            type: 'pair-device-initiated',
-            roomSecret: roomSecret,
-            pairKey: pairKey
-        });
-        this._joinSecretRoom(sender, roomSecret);
+        sender.pendingPairRoom = roomId;
+        this._send(sender, { type: 'pair-device-initiated', roomId: roomId });
+        this._joinSecretRoom(sender, roomId);
     }
 
     _onPairDeviceJoin(sender, message) {
@@ -317,38 +320,35 @@ export default class LanProjectsWsServer {
             return;
         }
 
-        if (!this._roomSecrets[message.pairKey] || sender.id === this._roomSecrets[message.pairKey].creator.id) {
+        // 服务器不知道 S，只能按房间 id 校验：房间必须已由发起方创建，且里面
+        // 已有别的设备。错误码派生出的 R 几乎必然不存在 -> 立即反馈"配对码无效"。
+        const roomId = message.roomId;
+        const room = this._rooms[roomId];
+        const creator = room && Object.keys(room).length
+            ? Object.values(room).find(p => p.id !== sender.id)
+            : null;
+        if (!roomId || !creator) {
             this._send(sender, { type: 'pair-device-join-key-invalid' });
             return;
         }
 
-        const roomSecret = this._roomSecrets[message.pairKey].roomSecret;
-        const creator = this._roomSecrets[message.pairKey].creator;
-        this._removePairKey(message.pairKey);
-        this._send(sender, {
-            type: 'pair-device-joined',
-            roomSecret: roomSecret,
-            peerId: creator.id
-        });
-        this._send(creator, {
-            type: 'pair-device-joined',
-            roomSecret: roomSecret,
-            peerId: sender.id
-        });
-        this._joinSecretRoom(sender, roomSecret);
-        this._removePairKey(sender.pairKey);
+        // 先发 pair-device-joined 再入房：客户端 UI 依赖先收到 joined（存下
+        // pairPeer）再收到 room 宣告（触发匹配），顺序颠倒会让配对对话框不关闭。
+        this._send(sender, { type: 'pair-device-joined', peerId: creator.id });
+        this._send(creator, { type: 'pair-device-joined', peerId: sender.id });
+        // 双方入房（服务器不向任何一方下发密钥）。
+        this._joinSecretRoom(sender, roomId);
+        creator.pendingPairRoom = null;
     }
 
     _onPairDeviceCancel(sender) {
-        const pairKey = sender.pairKey
-
-        if (!pairKey) return;
-
-        this._removePairKey(pairKey);
-        this._send(sender, {
-            type: 'pair-device-canceled',
-            pairKey: pairKey,
-        });
+        // 取消未完成的配对：拆掉待配对的秘密房间，已配对房间不受影响
+        // （pendingPairRoom 在配对成功时已被清空）。
+        const roomId = sender.pendingPairRoom;
+        if (!roomId) return;
+        sender.pendingPairRoom = null;
+        this._leaveSecretRoom(sender, roomId, true);
+        this._send(sender, { type: 'pair-device-canceled' });
     }
 
     _onCreatePublicRoom(sender) {
@@ -380,45 +380,6 @@ export default class LanProjectsWsServer {
     _onLeavePublicRoom(sender) {
         this._leavePublicRoom(sender, true);
         this._send(sender, { type: 'public-room-left' });
-    }
-
-    _onRegenerateRoomSecret(sender, message) {
-        const oldRoomSecret = message.roomSecret;
-        const newRoomSecret = randomizer.getRandomString(256);
-
-        // notify all other peers
-        for (const peerId in this._rooms[oldRoomSecret]) {
-            const peer = this._rooms[oldRoomSecret][peerId];
-            this._send(peer, {
-                type: 'room-secret-regenerated',
-                oldRoomSecret: oldRoomSecret,
-                newRoomSecret: newRoomSecret,
-            });
-            peer.removeRoomSecret(oldRoomSecret);
-        }
-        delete this._rooms[oldRoomSecret];
-    }
-
-    _createPairKey(creator, roomSecret) {
-        let pairKey;
-        do {
-            // get randomInt until keyRoom not occupied
-            pairKey = crypto.randomInt(1000000, 1999999).toString().substring(1); // include numbers with leading 0s
-        } while (pairKey in this._roomSecrets)
-
-        this._roomSecrets[pairKey] = {
-            roomSecret: roomSecret,
-            creator: creator
-        }
-
-        return pairKey;
-    }
-
-    _removePairKey(pairKey) {
-        if (pairKey in this._roomSecrets) {
-            this._roomSecrets[pairKey].creator.pairKey = null
-            delete this._roomSecrets[pairKey];
-        }
     }
 
     /**

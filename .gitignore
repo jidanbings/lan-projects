@@ -9,3 +9,7 @@ Thumbs.db
 # Releases, not committed to the repo.
 *.apk
 *.zip
+
+# Backup files never belong in the repo. SDK package.xml originals are
+# kept at <parent>/\sdk-package-xml-backups-<date>\ (outside the repo).
+*.bak

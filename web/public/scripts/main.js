@@ -16,6 +16,8 @@ class LanProjects {
             // crypto.subtle is unavailable on the non-HTTPS LAN origin). Loads
             // before network.js only defines classes, so runtime order is fine.
             "scripts/libs/chacha20.js",
+            // HKDF-SHA256 / HMAC-SHA256 for key derivation (pair-room id + session key)
+            "scripts/libs/crypto-util.js",
             "scripts/network.js",
             "scripts/ui.js",
             "scripts/libs/heic2any.min.js",
@@ -204,9 +206,10 @@ class LanProjects {
         const hash = window.location.hash.substring(1);
 
         // evaluate url params
-        if (urlParams.has('pair_key')) {
-            const pairKey = urlParams.get('pair_key');
-            this.pairDeviceDialog._pairDeviceJoin(pairKey);
+        if (urlParams.has('secret')) {
+            // 扫码带出高熵配对密钥 S（26 字符 base32），自动加入配对。
+            const secret = urlParams.get('secret');
+            this.pairDeviceDialog._pairDeviceJoin(secret);
         }
         else if (urlParams.has('room_id')) {
             const roomId = urlParams.get('room_id');

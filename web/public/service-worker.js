@@ -1,4 +1,4 @@
-const cacheVersion = 'v1.0.57';
+const cacheVersion = 'v1.0.59';
 const cacheTitle = `lan-projects-cache-${cacheVersion}`;
 const relativePathsToCache = [
     './',
@@ -19,6 +19,8 @@ const relativePathsToCache = [
     'scripts/libs/no-sleep.min.js',
     'scripts/libs/qr-code.min.js',
     'scripts/libs/zip.min.js',
+    'scripts/libs/chacha20.js',
+    'scripts/libs/crypto-util.js',
     'sounds/blop.mp3',
     'sounds/blop.ogg',
     'images/web.ico',

@@ -10,11 +10,21 @@ import android.content.res.AssetManager;
 import android.os.IBinder;
 import android.util.Log;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Foreground service that unpacks the bundled nodejs-project into
@@ -34,6 +44,14 @@ public class NodeService extends Service {
     // sees the PID the :node process later writes, so killNodeProcess() became
     // a silent no-op and "back to home" never killed the server.
     private static final String PID_FILE = "node.pid";
+
+    // Frontend integrity manifest: generated at build time by the Gradle task
+    // `generateIntegrityManifest` and packaged into the APK at
+    // assets/nodejs-project/integrity-manifest.json. Protected by the APK
+    // signature, so it is a trusted reference the runtime verifies against.
+    // (No leading dot in the name: AGP's asset merger would drop a dotfile.)
+    private static final String INTEGRITY_MANIFEST_ASSET =
+            "nodejs-project/integrity-manifest.json";
 
     public static final String ACTION_START = "io.lanprojects.phone.START_SERVER";
     public static final String ACTION_STOP = "io.lanprojects.phone.STOP_SERVER";
@@ -257,6 +275,24 @@ public class NodeService extends Service {
                     Log.i(TAG, "nodejs-project already present, reusing " + projectDir);
                 }
 
+                // Zero-trust frontend integrity check. Runs on EVERY startup
+                // (not only after extraction): a virus could tamper the on-disk
+                // copy at any time. If the extracted public/ differs from the
+                // signature-protected APK manifest, fail closed - never serve
+                // modified crypto code to clients.
+                String badFile = verifyFrontendIntegrity(new File(projectDir, "public"));
+                if (badFile != null) {
+                    String msg = "前端完整性校验失败（" + badFile + "），服务器未启动。";
+                    Log.e(TAG, "Frontend integrity check FAILED: " + badFile);
+                    ServerLog.log(NodeService.this, msg);
+                    serverRunning = false;
+                    stopForeground(STOP_FOREGROUND_REMOVE);
+                    notifyIntegrityFailure(msg);
+                    stopSelf();
+                    return;
+                }
+                Log.i(TAG, "Frontend integrity check OK");
+
                 // Give Node a writable temp/home inside the app sandbox.
                 NodeBridge.setEnv("TMPDIR", getCacheDir().getAbsolutePath());
                 NodeBridge.setEnv("HOME", getFilesDir().getAbsolutePath());
@@ -329,6 +365,97 @@ public class NodeService extends Service {
                 while ((n = is.read(buf)) != -1) os.write(buf, 0, n);
             }
         }
+    }
+
+    /**
+     * Frontend integrity check (zero-trust anchor).
+     * <p>
+     * The APK ships a SHA-256 manifest of every file under
+     * nodejs-project/public/ (see the Gradle task `generateIntegrityManifest`),
+     * protected by the APK signature. We re-verify the on-disk extraction
+     * against that trusted manifest here. The check is bidirectional: every
+     * on-disk file must appear in the manifest with a matching hash, and the
+     * file counts must line up (catches an attacker injecting extra files).
+     * Any mismatch means the frontend on disk is not the code we signed, so we
+     * fail closed - a non-root virus can rewrite /data/data/.../files/
+     * nodejs-project/public but cannot rewrite the APK assets, hence the
+     * manifest is a trustworthy reference.
+     *
+     * @return the offending relative path / reason, or {@code null} if every
+     *         file verifies.
+     */
+    private String verifyFrontendIntegrity(File publicDir) {
+        JSONObject manifest;
+        try (InputStream is = getAssets().open(INTEGRITY_MANIFEST_ASSET)) {
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = is.read(buf)) != -1) bos.write(buf, 0, n);
+            manifest = new JSONObject(bos.toString("UTF-8"));
+        } catch (Exception e) {
+            return "缺失完整性清单 (" + e.getClass().getSimpleName() + ")";
+        }
+
+        JSONArray files = manifest.optJSONArray("publicFiles");
+        if (files == null) return "完整性清单格式无效";
+
+        // path -> sha256, the trusted reference taken from the APK.
+        Map<String, String> expected = new HashMap<>();
+        for (int i = 0; i < files.length(); i++) {
+            JSONObject e = files.optJSONObject(i);
+            if (e == null) continue;
+            expected.put(e.optString("path"), e.optString("sha256"));
+        }
+
+        List<File> onDisk = new ArrayList<>();
+        collectFiles(publicDir, onDisk);
+        if (onDisk.size() != expected.size()) {
+            return "文件数量不符（磁盘 " + onDisk.size() + "，清单 " + expected.size() + "）";
+        }
+        for (File f : onDisk) {
+            String rel = publicDir.toPath().relativize(f.toPath()).toString().replace('\\', '/');
+            String want = expected.get(rel);
+            if (want == null) return "磁盘多出清单外文件: " + rel;
+            String got = sha256Hex(f);
+            if (!want.equalsIgnoreCase(got)) return "哈希不符: " + rel;
+        }
+        return null;
+    }
+
+    private void collectFiles(File dir, List<File> out) {
+        File[] children = dir.listFiles();
+        if (children == null) return;
+        for (File c : children) {
+            if (c.isDirectory()) collectFiles(c, out);
+            else out.add(c);
+        }
+    }
+
+    private String sha256Hex(File f) {
+        try (InputStream is = new FileInputStream(f)) {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = is.read(buf)) != -1) md.update(buf, 0, n);
+            StringBuilder sb = new StringBuilder();
+            for (byte b : md.digest()) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private void notifyIntegrityFailure(String msg) {
+        Notification n = new Notification.Builder(this, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_stat_transparent)
+                .setContentTitle("lan-projects 服务器未启动")
+                .setContentText("前端文件被篡改，已拒绝启动")
+                .setStyle(new Notification.BigTextStyle().bigText(msg))
+                .setLocalOnly(true)
+                .setAutoCancel(true)
+                .build();
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        if (nm != null) nm.notify(NOTIF_ID, n);
     }
 
     private void createNotificationChannel() {
