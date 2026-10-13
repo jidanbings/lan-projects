@@ -1,7 +1,11 @@
 // 配对 / 加密协议版本。服务器在 ws-config 中下发自己的版本，客户端不符即提示
 // 刷新或更新，而不是静默出现怪异行为（两端协议不一致时握手会失败，明确提示
 // 比让用户面对"传不了文件但没有任何报错"要好）。
-const LAN_PROTOCOL_VERSION = 1;
+//
+// v3：修正会话密钥握手时序（nonce 必须装在 K0 加密的确认包里传递，否则双方
+//     永远收敛不到同一把密钥），并加入每会话临时密钥（X25519，前向保密）与
+//     点选配对（临时 ECDH + 6 位 SAS 人工核对）。
+const LAN_PROTOCOL_VERSION = 3;
 
 // ---------------------------------------------------------------------------
 // 配对密钥助手（零信任服务器：S 永远不出设备）。
@@ -80,6 +84,117 @@ window.LanPairing = {
     generateSessionNonce() {
         const bytes = crypto.getRandomValues(new Uint8Array(32));
         return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    },
+
+    // ---- X25519 临时密钥协商（见 libs/x25519.js）----------------------------
+    // 两处用途：
+    //   1. 点选配对：临时 ECDH + 6 位 SAS 人工核对，不需要任何离网信道；
+    //   2. 每会话换钥：把会话密钥从「S 单独决定」升级为「S + 临时 ECDH」，
+    //      使长期密钥 S 事后泄漏也解不开历史会话（真正的 PCS）。
+
+    /** 生成一对临时 X25519 密钥。 */
+    generateEphemeralKeyPair() {
+        const secretKey = window.X25519.x25519.utils.randomSecretKey();
+        return {secretKey, publicKey: window.X25519.x25519.getPublicKey(secretKey)};
+    },
+
+    /** ECDH：由本端临时私钥与对端临时公钥算出共享密钥。 */
+    ecdh(secretKey, peerPublicKey) {
+        return window.X25519.x25519.getSharedSecret(secretKey, peerPublicKey);
+    },
+
+    /**
+     * 双方临时公钥的握手指纹，作为 HKDF salt。
+     *
+     * 两个公钥**排序后**拼接再哈希：谁先谁后不影响结果，因此两端各自算出的 salt
+     * 必然相同；同时它把派生的密钥绑定到本次这一对临时公钥上。
+     */
+    _transcriptSalt(publicKeyA, publicKeyB) {
+        const [x, y] = [this._toHex(publicKeyA), this._toHex(publicKeyB)].sort();
+        return window.CryptoUtil.sha256(new TextEncoder().encode(x + ':' + y));
+    },
+
+    /** 点选配对：由 ECDH 共享密钥派生握手密钥（AEAD 确认包用）。 */
+    deriveClickPairKey(shared, publicKeyA, publicKeyB) {
+        return window.CryptoUtil.hkdf(
+            window.CryptoUtil.sha256,
+            shared,
+            this._transcriptSalt(publicKeyA, publicKeyB),
+            new TextEncoder().encode('lan-projects-click-pair-v1'),
+            32);
+    },
+
+    /**
+     * 点选配对：6 位 SAS（Short Authentication String），供两台设备上的人眼核对。
+     *
+     * 它不是密钥，只是双方共享密钥的哈希——把它当"验证码"看，不存在"6 位熵太低
+     * 可爆破"的问题：攻击者要伪造出相同的 SAS，必须先真的算出 ECDH 共享密钥。
+     * 中间人（例如中毒的服务器）转接时两侧的 ECDH 结果不同，SAS 必然不同。
+     */
+    deriveClickPairSas(shared, publicKeyA, publicKeyB) {
+        const out = window.CryptoUtil.hkdf(
+            window.CryptoUtil.sha256,
+            shared,
+            this._transcriptSalt(publicKeyA, publicKeyB),
+            new TextEncoder().encode('lan-projects-click-pair-sas-v1'),
+            5);
+        let n = 0n;
+        for (const b of out) n = (n << 8n) | BigInt(b);
+        return (n % 1000000n).toString().padStart(6, '0');
+    },
+
+    /**
+     * 点选配对：由同一个 ECDH 结果派生出长期配对密钥 S'（128 位 -> 26 字符 base32）。
+     *
+     * 双方各自本地推导，**不经网络传输**，因此不存在"密钥传输被截获"的问题；
+     * 得到的 S' 与手动配对产生的 S 完全等价（同一条秘密房间链路）。
+     */
+    deriveClickPairSecret(shared, publicKeyA, publicKeyB) {
+        const bytes = window.CryptoUtil.hkdf(
+            window.CryptoUtil.sha256,
+            shared,
+            this._transcriptSalt(publicKeyA, publicKeyB),
+            new TextEncoder().encode('lan-projects-click-pair-secret-v1'),
+            16);
+        return this._bytesToBase32(bytes);
+    },
+
+    /**
+     * 每会话换钥（前向保密）：最终会话密钥 = HKDF(ECDH 共享密钥, salt=会话 nonce)。
+     *
+     * 与 K1 的区别：K1 完全由长期密钥 S 决定（S 一泄漏，历史会话全解），而这一把
+     * 还依赖只在本次会话存在过的临时私钥——会话结束即销毁，事后拿到 S 也解不开。
+     */
+    deriveSessionKeyPcs(shared, sessionNonce) {
+        const nonceBytes = typeof sessionNonce === 'string' && sessionNonce
+            ? new TextEncoder().encode(sessionNonce)
+            // 没有会话 nonce（两端都不是发起方）时空 salt = RFC 5869 的默认行为。
+            : new Uint8Array(0);
+        return window.CryptoUtil.hkdf(
+            window.CryptoUtil.sha256,
+            shared,
+            nonceBytes,
+            new TextEncoder().encode('lan-projects-session-key-v2'),
+            32);
+    },
+
+    /** SAS 显示分组：6 位数字按 3-3 分开，例如 "482 913"。 */
+    formatSas(sas) {
+        return `${sas.slice(0, 3)} ${sas.slice(3)}`;
+    },
+
+    /** 字节数组 -> 小写 hex。 */
+    _toHex(bytes) {
+        return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    },
+
+    /** hex -> 字节数组（长度不符返回 null）。 */
+    _fromHex(hex, expectedBytes) {
+        if (typeof hex !== 'string' || !/^[0-9a-f]+$/.test(hex) || hex.length % 2) return null;
+        const out = new Uint8Array(hex.length / 2);
+        for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+        if (expectedBytes && out.length !== expectedBytes) return null;
+        return out;
     },
 
     /** 是否形如合法的 26 字符 base32 配对码。 */
@@ -190,7 +305,13 @@ class ServerConnection {
         Events.on('room-secrets-deleted', e => this.send({ type: 'room-secrets-deleted', roomSecrets: e.detail}));
         Events.on('pair-device-initiate', _ => this._onPairDeviceInitiate());
         Events.on('pair-device-join', e => this._onPairDeviceJoin(e.detail));
-        Events.on('pair-device-cancel', _ => this.send({ type: 'pair-device-cancel' }));
+        Events.on('pair-device-cancel', e => this.send({
+            type: 'pair-device-cancel',
+            // 带上房间 id：加入方没有 pendingPairRoom，服务器得靠这个值才能
+            // 通知还在等待的另一方"对方已取消"。
+            roomId: e && e.detail ? e.detail.roomId : null
+        }));
+        Events.on('pair-click-send', e => this.sendClickPair(e.detail.peerId, e.detail.payload));
 
         Events.on('create-public-room', _ => this._onCreatePublicRoom());
         Events.on('join-public-room', e => this._onJoinPublicRoom(e.detail.roomId, e.detail.createIfInvalid));
@@ -246,7 +367,7 @@ class ServerConnection {
             console.error('LAN protocol version mismatch: server='
                 + wsConfig.protocolVersion + ' client=' + LAN_PROTOCOL_VERSION);
             Events.fire('notify-user', {
-                message: '⚠️ 协议版本不匹配，请刷新页面；App 用户请更新到最新版'
+                message: Localization.getTranslation("notifications.protocol-version-mismatch")
             });
         }
         Events.fire('ws-config', wsConfig);
@@ -409,6 +530,13 @@ class ServerConnection {
                 this._pendingBinaryFrom = msg.from;
                 this._pendingBinaryFromCount = Number.isFinite(msg.count) ? msg.count : 1;
                 break;
+            case 'ws-chunk-pause':
+                // 接收端积压：服务器请我们先停一停（不丢帧）。
+                Events.fire('ws-backpressure', {paused: true});
+                break;
+            case 'ws-chunk-resume':
+                Events.fire('ws-backpressure', {paused: false});
+                break;
             case 'ws-config':
                 this._setWsConfig(msg.wsConfig);
                 break;
@@ -445,6 +573,19 @@ class ServerConnection {
                 break;
             case 'pair-device-canceled':
                 Events.fire('pair-device-canceled');
+                break;
+            case 'pair-device-peer-canceled':
+                // 对端关闭/取消了配对对话框：服务器转告仍在等待的这一方。
+                Events.fire('pair-device-peer-canceled');
+                break;
+            case 'pair-click-request':
+            case 'pair-click-accept':
+            case 'pair-click-reject':
+            case 'pair-click-confirm':
+                // 点选配对握手。这几条必须在双方**还没有任何共享密钥**时就能互通，
+                // 所以走服务器的按房间转发通道（与 ws-fallback 开关无关）：服务器
+                // 只转交，公钥是公开值、确认包是 AEAD 密文，服务器拿不到密钥材料。
+                Events.fire('pair-click', msg);
                 break;
             case 'join-key-rate-limit':
                 Events.fire('notify-user', Localization.getTranslation("notifications.rate-limit-join-key"));
@@ -513,6 +654,21 @@ class ServerConnection {
     sendBinary(data) {
         if (!this._isConnected()) return;
         this._socket.send(data);
+    }
+
+    /**
+     * 点选配对：把一条握手消息中继给同一局域网房间里的另一台设备。
+     *
+     * 走的是服务器的 signal 转发通道（按房间转交），而不是 e2e 加密通道——
+     * 因为第一条消息发出时双方还没有任何共享密钥，必须先由临时 ECDH 建立密钥。
+     * 服务器只看到一对临时公钥与最终那条 AEAD 确认密文，永远拿不到密钥材料。
+     */
+    sendClickPair(peerId, payload) {
+        this.send({
+            ...payload,
+            to: peerId,
+            roomType: 'ip'
+        });
     }
 
     _onPeers(msg) {
@@ -841,9 +997,12 @@ class Peer {
         // refuses the transfer. There is deliberately no public fallback key.
         const secret = this._getPairSecret();
         if (secret) {
-            // 发起方为每个连接生成新的会话 nonce（前向保密：每次连接换钥）。
-            // 加入方在收到 e2e-confirm 时采用它。
-            if (this._isCaller && !this._sessionNonce) {
+            // 每个连接（每个 Peer 对象）生成一把新 nonce，双方都生成：
+            // 会话 nonce 由**双方**的 nonce 共同派生（见 _adoptSessionNonce），
+            // 因此不依赖"谁是发起方"这个易错的角色判断——曾经依赖 isCaller
+            // 决定谁的 nonce 胜出，而 isCaller 是服务器入房通知顺序决定的，
+            // 页面刷新后可能两侧都变成 true，于是各选各的 nonce、密钥分叉。
+            if (!this._sessionNonce) {
                 this._sessionNonce = window.LanPairing.generateSessionNonce();
             }
             this._deriveKey(secret, this._sessionNonce);
@@ -851,30 +1010,35 @@ class Peer {
     }
 
     _deriveKey(secret, sessionNonce) {
-        // 会话密钥 = HKDF-SHA256(ikm=S, salt=sessionNonce, info="lan-projects-session-key-v1")。
-        // 服务器拿不到 S，因此无法派生同样的 key。
+        // 握手密钥 K0 = HKDF-SHA256(S, info="lan-projects-key-v2")。
         //
-        // 前向保密：密钥由「长期配对密钥 S」与「每会话随机 nonce」共同派生，
-        // 于是每个会话的密钥彼此独立——单个会话密钥泄露不会波及其它会话。
-        // nonce 由发起方生成、随加密握手包传给加入方，双方据此收敛到同一把密钥。
+        // 时序要点（曾经的缺陷就出在这里）：nonce 必须装在**用 K0 加密**的确认包里
+        // 传出去，绝不能装进"用它自己派生出来的密钥"加密的包里——后者是鸡生蛋：
+        // 对方手里没有 nonce 就推不出那把密钥，也就永远解不开装着 nonce 的包。
+        // 结果是两台已配对的设备各自停在不同的密钥上（一方 HKDF(S,nonce)，另一方
+        // HKDF(S)），每个数据帧 AEAD 认证失败被丢弃，而界面仍显示"配对成功"。
+        //
+        // 现在：双方都先落到 K0 上做握手（S 一致就一定一致），确认包互通后再切换
+        // 到每会话密钥。错配（输错码 / 被恶意服务器路由进错误房间）依然在这一步
+        // 立即失败并提示，不会静默降级。
+        const baseKey = window.LanPairing.deriveKey(secret);
         this._sessionNonce = sessionNonce || null;
-        this._encryptionKey = sessionNonce
-            ? window.LanPairing.deriveSessionKey(secret, sessionNonce)
-            : window.LanPairing.deriveKey(secret);
+        this._baseKey = baseKey;
+        this._encryptionKey = baseKey;
         this._keyExchangeDone = true;
         Events.fire('e2e-encryption-active');
         const badge = document.getElementById('e2e-badge');
         if (badge) badge.removeAttribute('hidden');
 
-        // 配对确认握手：双方各自派生密钥后立即发一条 AEAD 加密的 e2e-confirm。
-        // 对端若持不同 S（输错码/被恶意服务器路由进错误房间），解密必失败并
-        // 触发提示，避免在错配状态下默默传文件。认证成功（_onE2e 收到合法
-        // e2e-confirm）即确认密钥一致。
-        //
-        // 同时携带本会话 nonce：对端收到后据此切换到同一个每会话密钥。nonce 本身
-        // 不是秘密（它只是 HKDF 的 salt），泄露它无法派生出 S 或密钥；但它必须
-        // **经过认证**才能避免被中间人替换——所以它在握手包内随 AEAD 一起发出，
-        // 而这条握手包是用旧（S 派生）密钥加密的，替换会导致认证失败。
+        // 记录"上次连接"时间，供设备列表展示（每个连接只写一次，不在数据热路径上）。
+        if (this._roomIds['secret']) {
+            PersistentStorage
+                .updateRoomSecretLastConnected(this._roomIds['secret'], Date.now())
+                .catch(_ => { /* 老记录不存在或浏览器不支持持久化，忽略 */ });
+        }
+
+        // 配对确认握手：双方各自发一条 K0 加密的确认包。
+        // sn：发起会话的一方（isCaller）的会话 nonce，对端据此切换到每会话密钥。
         this._sendEncrypted('e2e-confirm', {
             n: Array.from(crypto.getRandomValues(new Uint8Array(8))),
             sn: this._sessionNonce,
@@ -883,33 +1047,137 @@ class Peer {
     }
 
     /**
-     * 采用本会话的 nonce 并切换到每会话密钥（前向保密）。
+     * 收敛到本会话密钥（每会话一钥）。
      *
-     * 双方必须收敛到**同一个** nonce，否则密钥不一致。约定：**发起方（isCaller）
-     * 的 nonce 为准** —— 这是确定性的，双方各自可算，无需额外协商轮次，也不会
-     * 出现"两边同时换钥导致不一致"的竞态。两个 nonce 都是随机 32 字节，中间人
-     * 无法预测或操纵。
+     * 双方都在确认包里带上自己的 nonce，最终 nonce = 双方 nonce 排序拼接后的
+     * SHA-256。这样做的好处：
+     *   1. 结果与"谁是发起方"无关，两侧各自算出的值必然相同——不再依赖
+     *      isCaller 这个由入房通知顺序决定、刷新后可能两侧都变的角色标志；
+     *   2. 双方都往密钥里注入了熵，任何一方都无法独自把会话密钥固定成某个值。
      *
-     * e2e-confirm 是用「S 派生的密钥」加密的，所以 nonce 的传递经过认证：
-     * 中间人替换 sn 会让后续任何一帧都无法通过 AEAD 校验（双方密钥不再一致），
-     * 不会静默降级；调用方已承诺"解密失败即提示重新配对"。
+     * 确认包由握手密钥 K0 加密，因此 nonce 的传递是**经过认证**的：中间人
+     * 替换 nonce 会让双方派生出不同密钥，后续所有帧都无法通过 AEAD 校验，
+     * 不会静默降级。
      */
     _adoptSessionNonce(peerNonce) {
-        if (typeof peerNonce !== 'string' || !/^[0-9a-f]{64}$/.test(peerNonce)) {
-            // 对端未携带合法的会话 nonce（理论上不该发生，因为两端协议版本一致）。
-            // 保持当前派生方式，不静默改变密钥。
-            console.warn('E2E: 对端未携带合法的会话 nonce，保持现有会话密钥');
-            return;
-        }
-        // 发起方的 nonce 胜出；加入方采用发起方的。
-        const agreed = this._isCaller ? this._sessionNonce : peerNonce;
-        if (!agreed) return;
-        if (this._sessionNonceApplied === agreed) return;   // 已切换，避免重钥循环
         const secret = this._getPairSecret();
-        if (!secret) return;
+        if (!secret || !this._sessionNonce) return;
+
+        const peerNonceValid = typeof peerNonce === 'string' && /^[0-9a-f]{64}$/.test(peerNonce);
+        // 对端 nonce 还没到（或对端是旧版本）：先用自己这把，等它到达再一起换。
+        const agreed = peerNonceValid
+            ? this._combineNonces(this._sessionNonce, peerNonce)
+            : this._sessionNonce;
+        if (this._sessionNonceApplied === agreed) return;   // 已切换，避免重钥循环
+
         this._sessionNonceApplied = agreed;
-        this._sessionNonce = agreed;
+        this._agreedNonce = agreed;
         this._encryptionKey = window.LanPairing.deriveSessionKey(secret, agreed);
+        // 若对端临时公钥先到了（协议上不该发生，但别依赖顺序），这时才能算 K2。
+        this._derivePcsKeyIfReady();
+    }
+
+    /** 双方 nonce -> 同一个会话 nonce（与顺序无关，两侧结果一致）。 */
+    _combineNonces(nonceA, nonceB) {
+        const [x, y] = [nonceA, nonceB].sort();
+        const digest = window.CryptoUtil.sha256(new TextEncoder().encode(`lan-projects-session-nonce-v1:${x}:${y}`));
+        return Array.from(digest).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    // ---- 每会话临时密钥（前向保密）------------------------------------------
+    // 确认握手成功后，双方再交换一对临时 X25519 公钥，用 ECDH 结果派生最终会话
+    // 密钥 K2，随后销毁临时私钥。
+    //
+    // 它消除的是「S 事后泄漏」：K1 完全由长期密钥 S 决定，S 一泄漏历史会话全解；
+    // K2 还依赖只在本次会话存在过的临时私钥，会话结束即销毁，之后再拿到 S 也
+    // 解不开这次会话记录下来的流量。
+    //
+    // 临时公钥用当前会话密钥 AEAD 加密后发送，中间人替换公钥会直接认证失败，
+    // 不需要额外签名。
+
+    /** 生成并发出本端的临时公钥（幂等）。 */
+    _startPcsExchange() {
+        if (this._pcsStarted) return;
+        this._pcsStarted = true;
+        const keyPair = window.LanPairing.generateEphemeralKeyPair();
+        this._pcsSecretKey = keyPair.secretKey;
+        this._sendEncrypted('e2e-pcs-pub', {pk: window.LanPairing._toHex(keyPair.publicKey)});
+    }
+
+    _onPcsPublicKey(publicKeyHex) {
+        const peerPublicKey = window.LanPairing._fromHex(publicKeyHex, 32);
+        if (!peerPublicKey) return;
+        this._pcsPeerPublicKey = peerPublicKey;
+        // 对端先发到我方（或我方还没发）：补一次，保证双方都能算。
+        this._startPcsExchange();
+        this._derivePcsKeyIfReady();
+    }
+
+    _derivePcsKeyIfReady() {
+        if (this._pcsKey2 || !this._pcsSecretKey || !this._pcsPeerPublicKey) return;
+        // 会话 nonce 必须在手：它是 K2 的 salt，两端必须用同一个值。
+        if (!this._agreedNonce) return;
+
+        const shared = window.LanPairing.ecdh(this._pcsSecretKey, this._pcsPeerPublicKey);
+        // salt 用双方共同确定的会话 nonce（两侧一致），保证两端算出同一把 K2。
+        this._pcsKey2 = window.LanPairing.deriveSessionKeyPcs(shared, this._agreedNonce);
+
+        // 仍然用**当前**密钥发 ready：双方都只在收到对端 ready 之后才切换，
+        // 所以不会出现"一方已换钥、另一方还在旧钥"的丢帧窗口。
+        this._sendEncrypted('e2e-pcs-ready', {ok: true});
+
+        if (this._peerPcsReady) this._switchToPcsKey();
+    }
+
+    _switchToPcsKey() {
+        if (!this._pcsKey2 || this._pcsDone) return;
+        this._prevKey = this._encryptionKey;
+        this._encryptionKey = this._pcsKey2;
+        this._pcsDone = true;
+        // 临时私钥用完即弃：它是"事后拿到 S 也解不开本次会话"的唯一依据。
+        this._pcsSecretKey = null;
+        this._pcsPeerPublicKey = null;
+        this._pcsKey2 = null;
+    }
+
+    /**
+     * 当前可能生效的密钥，最新优先。
+     *
+     * 换钥瞬间两端各有一个极短的重叠窗口（一方已切换、在途帧还是旧钥），所以解密
+     * 时依次尝试。AEAD 带认证，多试一把密钥不会误判成"解密成功"。
+     */
+    _keyCandidates() {
+        const keys = [];
+        if (this._encryptionKey) keys.push(this._encryptionKey);
+        if (this._prevKey && this._prevKey !== this._encryptionKey) keys.push(this._prevKey);
+        // 已算出但还没正式切换的临时会话密钥：对端的 ready 包若丢失（例如恶意
+        // 服务器丢包），本端仍能用它解开对方已换钥后的帧，并在解开时补上切换。
+        if (this._pcsKey2 && this._pcsKey2 !== this._encryptionKey) keys.push(this._pcsKey2);
+        // 握手密钥只在 PCS 完成前参与回退：这段时间可能还有在途的握手包用它加密。
+        if (!this._pcsDone && this._baseKey && !keys.includes(this._baseKey)) {
+            keys.push(this._baseKey);
+        }
+        return keys;
+    }
+
+    /** 依次用候选密钥解一个 AEAD 帧（nonce‖密文‖tag），返回明文或 null。 */
+    _openFrame(view) {
+        const nonce = view.subarray(0, 12);
+        const sealed = view.subarray(12);
+        for (const key of this._keyCandidates()) {
+            try {
+                const plain = window.Chacha.chacha20poly1305(key, nonce).decrypt(sealed);
+                // 用当前密钥解开 = 换钥过渡结束，旧密钥不再需要
+                if (key === this._encryptionKey) this._prevKey = null;
+                // 用临时会话密钥解开 = 对端已换钥（它的 ready 可能丢在路上），
+                // 本端据此补上切换，避免"一侧新钥、一侧旧钥"的单向失联。
+                else if (key === this._pcsKey2) this._switchToPcsKey();
+                return plain;
+            } catch (e) {
+                // 换下一把候选密钥
+            }
+        }
+        return null;
     }
 
     _encrypt(data) {
@@ -950,18 +1218,15 @@ class Peer {
         // 每 1MB 省掉一次 1MB 分配与拷贝，显著降低 GC 抖动。
         // 安全性核对：noble 的 rt() 只做 `instanceof Uint8Array` 校验，subarray
         // 返回的仍是 Uint8Array 视图，完全兼容（不依赖 byteOffset=0）。
-        const nonce = view.subarray(0, 12);
-        const sealed = view.subarray(12);
-        try {
-            return window.Chacha.chacha20poly1305(this._encryptionKey, nonce)
-                .decrypt(sealed).buffer;
-        } catch (e) {
-            console.warn('E2E: AEAD 认证失败（数据被篡改或密钥不一致），丢弃该块', e);
+        const plain = this._openFrame(view);
+        if (plain === null) {
+            console.warn('E2E: AEAD 认证失败（数据被篡改或密钥不一致），丢弃该块');
             Events.fire('notify-user', {
-                message: '⚠️ 密文校验失败，已丢弃。可能密钥不一致或传输被篡改。'
+                message: Localization.getTranslation("notifications.e2e-decrypt-failed")
             });
             return null;
         }
+        return plain.buffer;
     }
 
     // ---- Encrypted envelope（元数据 + 配对确认）----------------------------
@@ -992,25 +1257,37 @@ class Peer {
         let inner;
         try {
             const frame = new Uint8Array(base64ToArrayBuffer(message.data));
-            const nonce = frame.slice(0, 12);
-            const sealed = frame.slice(12);
-            const plaintext = window.Chacha.chacha20poly1305(this._encryptionKey, nonce)
-                .decrypt(sealed);
-            inner = JSON.parse(new TextDecoder().decode(plaintext));
+            if (frame.length < 12 + 16) throw new Error('envelope too short');
+            const plain = this._openFrame(frame);
+            if (plain === null) throw new Error('AEAD authentication failed');
+            inner = JSON.parse(new TextDecoder().decode(plain));
         } catch (e) {
             // 认证失败 = 密钥不一致或数据被篡改。配对确认握手阶段失败说明对方
             // 持有不同 S（错配/被恶意服务器路由进错误房间），立即提示。
             console.warn('E2E: decrypt/verify failed, dropping', e);
             Events.fire('notify-user', {
-                message: '⚠️ 配对密钥不一致或数据被篡改，已丢弃。请重新配对。'
+                message: Localization.getTranslation("notifications.pairing-key-mismatch")
             });
             return;
         }
-        if (inner.type === 'e2e-confirm') {
-            // 配对确认：对端用相同 S 成功解出我们的确认 —— 密钥一致，进入可传状态。
-            this._e2eConfirmed = true;
-            this._adoptSessionNonce(inner.sn);
-            return;
+        switch (inner.type) {
+            case 'e2e-confirm':
+                // 配对确认：对端用相同 S 成功解出我们的确认 —— 密钥一致，进入可传状态。
+                this._e2eConfirmed = true;
+                this._adoptSessionNonce(inner.sn);
+                // 确认通过后再换一次临时密钥（前向保密）。
+                this._startPcsExchange();
+                return;
+            case 'e2e-pcs-pub':
+                // 对端的临时公钥（用当前会话密钥加密，故已认证）。
+                this._onPcsPublicKey(inner.pk);
+                return;
+            case 'e2e-pcs-ready':
+                // 对端已算出临时会话密钥。双方都只在收到对方 ready 后才切换，
+                // 因此不存在"一方已换钥、另一方还在旧钥"的丢帧窗口。
+                this._peerPcsReady = true;
+                this._switchToPcsKey();
+                return;
         }
         this._onMessage(JSON.stringify(inner));
     }
@@ -1024,7 +1301,9 @@ class Peer {
         if (!this._encryptionKey) this._initEncryption();
         if (!this._encryptionKey) {
             console.error('Blocked: peers not paired, transfer rejected');
-            Events.fire('notify-user', { message: '❌ 未配对，已拒绝传输。请先点击顶栏 🔗 配对' });
+            Events.fire('notify-user', {
+                message: Localization.getTranslation("notifications.pairing-required")
+            });
             this._busy = false;
             this._filesQueue = [];
             return null;
@@ -1107,6 +1386,32 @@ class Peer {
     /** Hook for transports that carry per-file framing state (see WSPeer). */
     _onNewSendFile() {
     }
+
+    /**
+     * 接收端积压时服务器发来的暂停/恢复指令（见 ws-server 的背压处理）。
+     *
+     * 之所以要真的停下来：服务器在积压时不再丢帧，改为让发送方等一等，这样
+     * 接收端的文件不会缺块。发送方慢下来之后，整体速度由接收端的实际处理能力
+     * 决定，而不是"发得快、丢得多、最后整包失败"。
+     */
+    _onBackpressure(paused) {
+        if (!this._chunker) return;      // 本端当前没有正在发送的文件
+        if (paused) {
+            this._chunker.pause();
+            // 兜底：resume 指令万一没到，不能让传输永久卡死。
+            clearTimeout(this._backpressureResumeTimer);
+            this._backpressureResumeTimer = setTimeout(() => {
+                console.warn('Backpressure: 等不到 resume 指令，自动恢复发送');
+                if (this._chunker) this._chunker.resume();
+            }, Peer.BACKPRESSURE_TIMEOUT_MS);
+            return;
+        }
+        clearTimeout(this._backpressureResumeTimer);
+        this._backpressureResumeTimer = null;
+        this._chunker.resume();
+    }
+
+    static get BACKPRESSURE_TIMEOUT_MS() { return 5000; }
 
     _onPartitionEnd(offset) {
         this._sendEncrypted('partition', { offset: offset });
@@ -1706,7 +2011,18 @@ class PeersManager {
         Events.on('auto-accept-updated', e => this._onAutoAcceptUpdated(e.detail.roomSecret, e.detail.autoAccept));
         Events.on('ws-disconnected', _ => this._onWsDisconnected());
         Events.on('ws-relay', e => this._onWsRelay(e.detail));
+        Events.on('ws-backpressure', e => this._onBackpressure(e.detail.paused));
         Events.on('ws-config', e => this._onWsConfig(e.detail));
+    }
+
+    /**
+     * 服务器请我们暂停/恢复发送（接收端积压）。
+     *
+     * 指令没有指明是哪条连接——同一时刻界面上只会有一个传输在跑，所以对所有
+     * peer 广播一次；没有在发文件的 peer 会直接忽略（它们没有 chunker）。
+     */
+    _onBackpressure(paused) {
+        Object.values(this.peers).forEach(peer => peer._onBackpressure(paused));
     }
 
     _onWsConfig(wsConfig) {
@@ -1979,7 +2295,25 @@ class FileChunker {
         this._readChunk();
     }
 
+    /**
+     * 暂停读取后续分块。
+     *
+     * 接收端积压时服务器会发来暂停指令，此时发送方必须真的停下来——旧实现在这种
+     * 情况下由服务器**丢弃数据帧**，接收端文件残缺，整次传输最后以失败收场。
+     */
+    pause() {
+        this._paused = true;
+    }
+
+    /** 恢复读取（从当前位置继续，不重传已发过的块）。 */
+    resume() {
+        if (!this._paused) return;
+        this._paused = false;
+        if (!this.isFileEnd()) this._readChunk();
+    }
+
     _readChunk() {
+        if (this._paused) return;
         const chunk = this._file.slice(this._offset, this._offset + this._chunkSize);
         this._reader.readAsArrayBuffer(chunk);
     }

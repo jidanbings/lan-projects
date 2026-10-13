@@ -117,8 +117,9 @@ class PersistentStorage {
     /**
      * @param roomSecret 房间路由 id R（64 位十六进制，由 S 派生）
      * @param pairSecret 配对密钥 S（26 字符 base32，只在本地存储，服务器见不到）
+     * @param pairMethod 配对方式：'qr'（扫码）/ 'code'（手输配对码）/ 'click'（设备列表点选）
      */
-    static addRoomSecret(roomSecret, pairSecret, displayName, deviceName) {
+    static addRoomSecret(roomSecret, pairSecret, displayName, deviceName, pairMethod = null) {
         return new Promise((resolve, reject) => {
             const DBOpenRequest = window.indexedDB.open('lan_projects_store');
             DBOpenRequest.onsuccess = e => {
@@ -130,7 +131,10 @@ class PersistentStorage {
                     'pair_secret': pairSecret,
                     'display_name': displayName,
                     'device_name': deviceName,
-                    'auto_accept': false
+                    'auto_accept': false,
+                    'alias': null,
+                    'pair_method': pairMethod,
+                    'last_connected': null
                 });
                 objectStoreRequest.onsuccess = e => {
                     console.log(`Request successful. RoomSecret added: ${e.target.result}`);
@@ -261,14 +265,32 @@ class PersistentStorage {
     }
 
     static updateRoomSecretNames(roomSecret, displayName, deviceName) {
-        return this.updateRoomSecret(roomSecret, undefined, displayName, deviceName);
+        return this.patchRoomSecret(roomSecret, {'display_name': displayName, 'device_name': deviceName});
     }
 
     static updateRoomSecretAutoAccept(roomSecret, autoAccept) {
-        return this.updateRoomSecret(roomSecret, undefined, undefined, undefined, autoAccept);
+        return this.patchRoomSecret(roomSecret, {'auto_accept': autoAccept});
     }
 
-    static updateRoomSecret(roomSecret, updatedRoomSecret = undefined, updatedDisplayName = undefined, updatedDeviceName = undefined, updatedAutoAccept = undefined) {
+    /** 本机给这台设备起的别名（只存在本机，不会发给对方）。 */
+    static updateRoomSecretAlias(roomSecret, alias) {
+        return this.patchRoomSecret(roomSecret, {'alias': alias || null});
+    }
+
+    /** 记录最近一次成功建立会话的时间，供设备列表显示"上次连接"。 */
+    static updateRoomSecretLastConnected(roomSecret, timestamp) {
+        return this.patchRoomSecret(roomSecret, {'last_connected': timestamp});
+    }
+
+    /**
+     * 局部更新一条已配对设备记录：只覆盖 patch 里出现的字段，其余原样保留。
+     *
+     * 旧写法是一长串位置参数（updatedRoomSecret、updatedDisplayName…），字段一多
+     * 就容易错位，而错位会把 pair_secret 写坏、让配对静默失效，所以改成按字段更新。
+     * 老记录没有后来新增的字段（alias / pair_method / last_connected），读取方按
+     * "缺省即未知"处理，因此不需要 IndexedDB 版本迁移。
+     */
+    static patchRoomSecret(roomSecret, patch) {
         return new Promise((resolve, reject) => {
             const DBOpenRequest = window.indexedDB.open('lan_projects_store');
             DBOpenRequest.onsuccess = e => {
@@ -282,13 +304,20 @@ class PersistentStorage {
                         const transaction = db.transaction('room_secrets', 'readwrite');
                         const objectStore = transaction.objectStore('room_secrets');
                         // Do not use `updatedRoomSecret ?? roomSecretEntry.entry.secret` to ensure compatibility with older browsers
+                        const entry = roomSecretEntry.entry;
                         const updatedRoomSecretEntry = {
-                            'secret': updatedRoomSecret !== undefined ? updatedRoomSecret : roomSecretEntry.entry.secret,
-                            'pair_secret': roomSecretEntry.entry.pair_secret,
-                            'display_name': updatedDisplayName !== undefined ? updatedDisplayName : roomSecretEntry.entry.display_name,
-                            'device_name': updatedDeviceName !== undefined ? updatedDeviceName : roomSecretEntry.entry.device_name,
-                            'auto_accept': updatedAutoAccept !== undefined ? updatedAutoAccept : roomSecretEntry.entry.auto_accept
+                            'secret': entry.secret,
+                            'pair_secret': entry.pair_secret,
+                            'display_name': entry.display_name,
+                            'device_name': entry.device_name,
+                            'auto_accept': entry.auto_accept,
+                            'alias': entry.alias !== undefined ? entry.alias : null,
+                            'pair_method': entry.pair_method !== undefined ? entry.pair_method : null,
+                            'last_connected': entry.last_connected !== undefined ? entry.last_connected : null
                         };
+                        Object.keys(patch).forEach(key => {
+                            if (patch[key] !== undefined) updatedRoomSecretEntry[key] = patch[key];
+                        });
 
                         const objectStoreRequestUpdate = objectStore.put(updatedRoomSecretEntry, roomSecretEntry.key);
 

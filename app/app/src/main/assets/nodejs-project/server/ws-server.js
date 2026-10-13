@@ -7,7 +7,10 @@ import {hasher, randomizer} from "./helper.js";
 
 // 配对/加密协议版本。此版本破坏性变更了配对协议与加密格式（HKDF-SHA256 +
 // ChaCha20-Poly1305 AEAD），随 ws-config 下发给客户端，旧客户端版本不符会提示。
-const LAN_PROTOCOL_VERSION = 2;
+//
+// v3：修正会话密钥握手时序（nonce 装在握手密钥加密的确认包里传递），加入每会话
+//     临时密钥（前向保密）与点选配对（临时 ECDH + 6 位 SAS 人工核对）。
+const LAN_PROTOCOL_VERSION = 3;
 
 // Append a line to the same server.log the Android app's 查看日志 screen reads
 // (HOME is set to the app's files dir by NodeService). Used to diagnose the
@@ -177,7 +180,24 @@ export default class LanProjectsWsServer {
                 this._onPairDeviceJoin(sender, message);
                 break;
             case 'pair-device-cancel':
-                this._onPairDeviceCancel(sender);
+                this._onPairDeviceCancel(sender, message);
+                break;
+            case 'pair-click-request':
+            case 'pair-click-accept':
+            case 'pair-click-reject':
+            case 'pair-click-confirm':
+                // 点选配对（局域网设备列表里点一台设备直接配对）。这几条必须在
+                // 双方**还没有任何共享密钥**时就能互通，所以按房间原样转交，
+                // 与 ws-fallback 开关无关（它本来就是 WebSocket 中继）。
+                //
+                // 服务器看到的只是：一对临时 X25519 公钥（公开值）和最终那条
+                // AEAD 确认密文。密钥材料不经过服务器——密钥由双方临时 ECDH
+                // 各自算出，而 6 位 SAS 只是共享密钥的哈希，供人眼核对中间人。
+                if (sender.rateLimitReached()) {
+                    this._send(sender, { type: 'join-key-rate-limit' });
+                    break;
+                }
+                this._signalAndRelay(sender, message);
                 break;
             case 'create-public-room':
                 this._onCreatePublicRoom(sender);
@@ -255,6 +275,23 @@ export default class LanProjectsWsServer {
      */
     static get MAX_CHUNK_GRANT() { return 64; }
 
+    /**
+     * 接收端积压阈值。
+     *
+     * 超过 MAX_BUFFERED 就让发送方暂停（而不是丢帧），降到 RESUME_BUFFERED 以下再放行。
+     * 旧实现在积压时**直接丢弃该数据帧**：接收端的文件于是少了一块，直到整个文件
+     * 传完才发现大小不符、整次传输作废——用户看到的是"传到一半失败了"，而且日志里
+     * 只有一行 BACKPRESSURE，很难联想到是丢帧导致的。
+     */
+    static get MAX_BUFFERED() { return 8 * 1024 * 1024; }
+    static get RESUME_BUFFERED() { return 2 * 1024 * 1024; }
+
+    /**
+     * 硬上限：万一对方是旧版客户端、不认识暂停指令，也不能让本进程无限缓冲
+     * （它跑在同一台低内存手机上）。到这一步才退回丢弃，并明确记录。
+     */
+    static get HARD_BUFFER_LIMIT() { return 32 * 1024 * 1024; }
+
     _onWsChunkPrep(sender, message) {
         if (!message.to || !Peer.isValidUuid(message.to)) return;
         let count = Number.isFinite(message.count) ? Math.floor(message.count) : 1;
@@ -267,7 +304,39 @@ export default class LanProjectsWsServer {
             // Tell the receiver how many frames to expect so it can bind the
             // sender id to that many incoming binary frames.
             this._send(recipient, { type: 'ws-chunk-prep', from: sender.id, count: count });
+            // 接收端已经积压：在授权下一批之前就让发送方停住。
+            this._maybePauseSender(sender, recipient);
         }
+    }
+
+    /** 接收端积压过多时让发送方暂停；返回是否处于积压状态。 */
+    _maybePauseSender(sender, recipient) {
+        if (recipient.socket.bufferedAmount <= LanProjectsWsServer.MAX_BUFFERED) return false;
+
+        if (!sender.pausedForBackpressure) {
+            sender.pausedForBackpressure = true;
+            this._send(sender, { type: 'ws-chunk-pause' });
+            dlog('BACKPRESSURE-PAUSE recipient=' + tag(recipient.id)
+                + ' buffered=' + recipient.socket.bufferedAmount);
+            this._watchBackpressure(sender, recipient);
+        }
+        return true;
+    }
+
+    /** 轮询接收端缓冲，降到低水位后恢复发送方。 */
+    _watchBackpressure(sender, recipient) {
+        const check = () => {
+            if (!sender.pausedForBackpressure) return;
+            if (recipient.socket.readyState !== recipient.socket.OPEN
+                || recipient.socket.bufferedAmount <= LanProjectsWsServer.RESUME_BUFFERED) {
+                sender.pausedForBackpressure = false;
+                this._send(sender, { type: 'ws-chunk-resume' });
+                dlog('BACKPRESSURE-RESUME recipient=' + tag(recipient.id));
+                return;
+            }
+            setTimeout(check, 50);
+        };
+        setTimeout(check, 50);
     }
 
     /** Forward a raw binary file chunk to its announced recipient. */
@@ -282,17 +351,15 @@ export default class LanProjectsWsServer {
         }
         const recipient = this._peersById[grant.to];
         if (recipient && recipient.socket.readyState === recipient.socket.OPEN) {
-            // Backpressure: if the receiver is not draining, do not pile an
-            // unbounded queue onto this process (it runs on the same low-RAM
-            // phone we are trying to protect). Report it so the sender can
-            // pace itself; the transfer is retried by the existing partition
-            // protocol rather than silently buffered forever.
-            const MAX_BUFFERED = 8 * 1024 * 1024;
-            if (recipient.socket.bufferedAmount > MAX_BUFFERED) {
-                dlog('BACKPRESSURE peer=' + tag(recipient.id)
+            // 正常情况下永远不丢数据帧：积压时靠暂停发送方来限流（见 _maybePauseSender）。
+            // 只有对方是完全不认暂停指令的旧客户端、缓冲冲到硬上限时才退回丢弃，
+            // 以免把这个跑在手机上的进程撑爆。
+            if (recipient.socket.bufferedAmount > LanProjectsWsServer.HARD_BUFFER_LIMIT) {
+                dlog('DROPPED-BINARY peer=' + tag(recipient.id) + ' reason=hard-buffer-limit'
                     + ' buffered=' + recipient.socket.bufferedAmount);
             } else {
                 recipient.socket.send(data, { binary: true });
+                this._maybePauseSender(sender, recipient);
             }
         }
         grant.count -= 1;
@@ -308,6 +375,8 @@ export default class LanProjectsWsServer {
             + ' remainingIpRoom=' + (this._rooms[this._ipRoomId()] ? Object.keys(this._rooms[this._ipRoomId()]).length : 0));
 
         sender.pendingPairRoom = null;
+        // 断开时清掉背压暂停标志，避免残留状态（watch 循环也据此自然结束）。
+        sender.pausedForBackpressure = false;
 
         this._cancelKeepAlive(sender);
         delete this._keepAliveTimers[sender.id];
@@ -406,12 +475,26 @@ export default class LanProjectsWsServer {
         creator.pendingPairRoom = null;
     }
 
-    _onPairDeviceCancel(sender) {
+    _onPairDeviceCancel(sender, message) {
         // 取消未完成的配对：拆掉待配对的秘密房间，已配对房间不受影响
         // （pendingPairRoom 在配对成功时已被清空）。
-        const roomId = sender.pendingPairRoom;
+        //
+        // 加入方没有 pendingPairRoom（只有发起方在 initiate 时设置），所以它取消时
+        // 由客户端把房间 id 带上来。否则"发起方一直在等、加入方点了取消"这种情况
+        // 下，发起方这边毫无反馈，只能干等超时——界面看起来就是卡住了。
+        const roomId = (message && message.roomId) || sender.pendingPairRoom;
         if (!roomId) return;
         sender.pendingPairRoom = null;
+
+        const room = this._rooms[roomId];
+        // 只有确实在这个房间里才通知其他人，避免拿别人的房间 id 去打扰对方。
+        if (room && room[sender.id]) {
+            for (const peerId in room) {
+                if (peerId === sender.id) continue;
+                this._send(room[peerId], { type: 'pair-device-peer-canceled' });
+            }
+        }
+
         this._leaveSecretRoom(sender, roomId, true);
         this._send(sender, { type: 'pair-device-canceled' });
     }

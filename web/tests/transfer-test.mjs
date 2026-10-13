@@ -131,7 +131,7 @@ const key = LanPairing.deriveKey(S);
 const A = makeClient('A'), B = makeClient('B');
 await open(A); await open(B);
 const cfg = await waitMsg(A, 'ws-config');
-ok('ws-config protocolVersion=2', cfg.wsConfig.protocolVersion === 2);
+ok('ws-config protocolVersion=3', cfg.wsConfig.protocolVersion === 3);
 
 A.ws.send(JSON.stringify({ type: 'pair-device-initiate', roomId: R }));
 await waitMsg(A, 'pair-device-initiated');

@@ -134,6 +134,9 @@ class PeersUI {
         }
 
         Object.keys(peer._roomIds).forEach(roomType => peerNode.classList.add(`type-${roomType}`));
+
+        // 房间类型变化（例如刚配对成功）时刷新"配对"入口的显示。
+        if (peerNode.ui) peerNode.ui._evaluatePairButton();
     }
 
     _evaluateOverflowingPeers() {
@@ -455,6 +458,7 @@ class PeerUI {
                     <div class="name font-subheading"></div>
                     <div class="device-name font-body2"></div>
                     <div class="status font-body2"></div>
+                    <button class="btn btn-rounded btn-grey pair-click-btn" type="button" hidden></button>
                 </div>
             </label>`;
 
@@ -464,6 +468,30 @@ class PeerUI {
 
         this.$label = this.$el.querySelector('label');
         this.$input = this.$el.querySelector('input');
+        this.$pairBtn = this.$el.querySelector('.pair-click-btn');
+        this.$pairBtn.textContent = Localization.getTranslation('dialogs.click-pair-button');
+        this.$pairBtn.addEventListener('click', e => {
+            // 整张设备卡片是个 <label>（点它会打开文件选择框）。按钮必须同时
+            // preventDefault 与 stopPropagation，否则点"配对"会弹出选文件窗口。
+            e.preventDefault();
+            e.stopPropagation();
+            Events.fire('pair-click-start', {peerId: this._peer.id});
+        });
+        this._evaluatePairButton();
+    }
+
+    /**
+     * 未配对的局域网设备才显示"配对"入口。
+     *
+     * 已经配对过的设备本来就能直接传文件，同浏览器的另一个标签页也不是独立设备
+     * （配对没有意义），两者都不显示。
+     */
+    _evaluatePairButton() {
+        if (!this.$pairBtn) return;
+        const paired = !!this._peer._roomIds['secret'];
+        const sameBrowser = this._peer._isSameBrowser();
+        if (paired || sameBrowser) this.$pairBtn.setAttribute('hidden', true);
+        else this.$pairBtn.removeAttribute('hidden');
     }
 
     addTypesToClassList() {
@@ -1338,6 +1366,10 @@ class PairDeviceDialog extends Dialog {
         this.$form = this.$el.querySelector('form');
         this.$closeBtn = this.$el.querySelector('[close]')
         this.$pairSubmitBtn = this.$el.querySelector('button[type="submit"]');
+        this.$copyCodeBtn = this.$el.querySelector('#pair-copy-code');
+        this.$regenerateBtn = this.$el.querySelector('#pair-regenerate');
+        this.$status = this.$el.querySelector('.pair-status');
+        this.$statusText = this.$el.querySelector('.pair-status-text');
 
         // 单个文本输入框接收 26 字符 base32 配对码（大写过滤、去连字符、支持
         // 粘贴）。粘帖也会触发 input 事件，无需单独处理 paste。
@@ -1353,6 +1385,8 @@ class PairDeviceDialog extends Dialog {
         this.$pairDeviceHeaderBtn.addEventListener('click', _ => this._pairDeviceInitiate());
         this.$form.addEventListener('submit', e => this._onSubmit(e));
         this.$closeBtn.addEventListener('click', _ => this._close());
+        this.$copyCodeBtn.addEventListener('click', _ => this._copyPairSecret());
+        this.$regenerateBtn.addEventListener('click', _ => this._regeneratePairSecret());
 
         Events.on('keydown', e => this._onKeyDown(e));
         Events.on('ws-disconnected', _ => this.hide());
@@ -1360,13 +1394,57 @@ class PairDeviceDialog extends Dialog {
         Events.on('pair-device-joined', e => this._onPairDeviceJoined(e.detail.peerId));
         Events.on('peers', e => this._onPeers(e.detail));
         Events.on('peer-joined', e => this._onPeerJoined(e.detail));
-        Events.on('pair-device-join-key-invalid', _ => this._onPublicRoomJoinKeyInvalid());
+        Events.on('pair-device-join-key-invalid', _ => this._onPairDeviceJoinKeyInvalid());
+        Events.on('pair-device-peer-canceled', _ => this._onPairDevicePeerCanceled());
+        Events.on('pair-device-canceled', _ => this._stopWaiting());
         Events.on('evaluate-number-room-secrets', _ => this._evaluateNumberRoomSecrets())
         Events.on('secret-room-deleted', e => this._onSecretRoomDeleted(e.detail));
         this.$qrCode.addEventListener('click', _ => this._copyPairUrl());
 
         this.pairPeer = {};
         this.pairSecret = null;
+        // 配对方式：扫码（URL 带 secret）还是手输配对码。用于设备列表里显示来源。
+        this.pairMethod = null;
+    }
+
+    // ---- 进行中的状态提示 ---------------------------------------------------
+    // 以前这里在生成配对码之后完全静止：发起方不知道对方有没有在看，加入方提交
+    // 之后也没有任何反馈，对方取消更是毫无提示——用户只能靠"界面卡住没有"来判断。
+
+    _startWaiting(translationKey, {timeoutMs = 0, onTimeout = null} = {}) {
+        this._stopWaiting();
+        this._waitingSince = Date.now();
+        this._waitingKey = translationKey;
+        this.$status.removeAttribute('hidden');
+        this._renderWaitingText();
+        this._statusTimer = setInterval(() => this._renderWaitingText(), 1000);
+        if (timeoutMs) {
+            this._timeoutTimer = setTimeout(() => {
+                this._stopWaiting();
+                if (onTimeout) onTimeout();
+            }, timeoutMs);
+        }
+    }
+
+    _renderWaitingText() {
+        if (!this._waitingKey) return;
+        const seconds = Math.max(0, Math.round((Date.now() - this._waitingSince) / 1000));
+        this.$statusText.innerText = Localization.getTranslation(this._waitingKey, null, {seconds: seconds});
+    }
+
+    _stopWaiting() {
+        if (this._statusTimer) clearInterval(this._statusTimer);
+        if (this._timeoutTimer) clearTimeout(this._timeoutTimer);
+        this._statusTimer = null;
+        this._timeoutTimer = null;
+        this._waitingKey = null;
+        if (this.$status) this.$status.setAttribute('hidden', true);
+        if (this.$statusText) this.$statusText.innerText = '';
+    }
+
+    hide() {
+        this._stopWaiting();
+        super.hide();
     }
 
     _onKeyDown(e) {
@@ -1398,24 +1476,26 @@ class PairDeviceDialog extends Dialog {
         if (!$hint) return;
 
         const len = normalized.length;
-        const NEEDED = 26;
+        const needed = 26;
         if (len === 0) {
             $hint.innerText = '';
             $hint.removeAttribute('data-state');
             return;
         }
-        if (len < NEEDED) {
+        if (len < needed) {
             // 明确告诉用户还差几位，而不是只说"无效"。
-            $hint.innerText = `已输入 ${len} / ${NEEDED} 位，还差 ${NEEDED - len} 位`;
+            $hint.innerText = Localization.getTranslation(
+                "dialogs.key-hint-pending", null, {count: len, needed: needed, missing: needed - len});
             $hint.setAttribute('data-state', 'pending');
             return;
         }
-        if (len > NEEDED) {
-            $hint.innerText = `超出 ${len - NEEDED} 位，配对码固定 ${NEEDED} 位`;
+        if (len > needed) {
+            $hint.innerText = Localization.getTranslation(
+                "dialogs.key-hint-too-long", null, {count: len, needed: needed, extra: len - needed});
             $hint.setAttribute('data-state', 'error');
             return;
         }
-        $hint.innerText = '长度正确，可以配对';
+        $hint.innerText = Localization.getTranslation("dialogs.key-hint-complete");
         $hint.setAttribute('data-state', 'ok');
     }
 
@@ -1428,10 +1508,25 @@ class PairDeviceDialog extends Dialog {
         // 由本地事件携带或从 secretMap 按 R 取回。
         this.pairSecret = msg.secret || window.LanPairing.secretMap.get(msg.roomId);
         this.roomSecret = msg.roomId;
+        if (this.pairMethod !== 'click') this.pairMethod = this.pairMethod || 'code';
         this._setKeyAndQRCode();
         this.$keyInput.removeAttribute('disabled');
+        this.$copyCodeBtn.removeAttribute('hidden');
+        this.$regenerateBtn.removeAttribute('hidden');
         this.show();
+        // 发起方：等对方输入配对码/扫码加入。等不到就明确说等不到了，并提示可以
+        // 重新生成——而不是让二维码一直摆在那里、用户不知道它还新不新。
+        this._startWaiting("dialogs.pair-waiting-for-peer", {
+            timeoutMs: PairDeviceDialog.INITIATOR_TIMEOUT_MS,
+            onTimeout: () => {
+                this.$status.removeAttribute('hidden');
+                this.$statusText.innerText = Localization.getTranslation("dialogs.pair-waiting-timeout");
+            }
+        });
     }
+
+    static get INITIATOR_TIMEOUT_MS() { return 120000; }
+    static get JOINER_TIMEOUT_MS() { return 15000; }
 
     _setKeyAndQRCode() {
         // 26 字符 base32 按 9-9-8 分组展示，方便跨设备口头/手抄核对。
@@ -1469,6 +1564,30 @@ class PairDeviceDialog extends Dialog {
             })
     }
 
+    /** 复制 26 字符配对码本身（不是链接）：口头转述或粘贴到对方设备用得上。 */
+    _copyPairSecret() {
+        if (!this.pairSecret) return;
+        navigator.clipboard.writeText(this.pairSecret)
+            .then(_ => {
+                Events.fire('notify-user', Localization.getTranslation("notifications.pair-code-copied-to-clipboard"));
+            })
+            .catch(_ => {
+                Events.fire('notify-user', Localization.getTranslation("notifications.copied-to-clipboard-error"));
+            })
+    }
+
+    /**
+     * 重新生成一把新配对密钥。
+     *
+     * 旧配对码没有有效期概念，也没法主动作废：界面一直摆着同一张二维码，用户
+     * 无从判断对方手里的是不是刚才那一张。这里显式作废旧的（通知服务器拆掉旧
+     * 房间）再生成新的。
+     */
+    _regeneratePairSecret() {
+        this._pairDeviceCancel();
+        setTimeout(() => this._pairDeviceInitiate(), 50);
+    }
+
     _onSubmit(e) {
         e.preventDefault();
         this._submit();
@@ -1478,10 +1597,21 @@ class PairDeviceDialog extends Dialog {
         this._pairDeviceJoin(this.$keyInput.value);
     }
 
-    _pairDeviceJoin(code) {
+    _pairDeviceJoin(code, {fromQr = false} = {}) {
         code = window.LanPairing.normalizeCode(code);
         if (window.LanPairing.isValidCode(code)) {
             this.pairSecret = code;
+            this.pairMethod = fromQr ? 'qr' : 'code';
+            this.show();
+            // 加入方：提交后到"配对成功"之间可能隔着好几秒（等服务器回执、等对端
+            // 入房），这段时间界面必须有反馈，否则用户会重复点按钮。
+            this._startWaiting("dialogs.pair-connecting", {
+                timeoutMs: PairDeviceDialog.JOINER_TIMEOUT_MS,
+                onTimeout: () => {
+                    this.$status.removeAttribute('hidden');
+                    this.$statusText.innerText = Localization.getTranslation("dialogs.pair-join-timeout");
+                }
+            });
             Events.fire('pair-device-join', code);
         }
     }
@@ -1509,6 +1639,7 @@ class PairDeviceDialog extends Dialog {
             "peerId": peerId,
             "roomSecret": roomId
         };
+        this._startWaiting("dialogs.pair-establishing");
     }
 
     _onPeers(message) {
@@ -1548,8 +1679,9 @@ class PairDeviceDialog extends Dialog {
         // 配对密钥 S 只存在于本地内存映射里（服务器见不到）。
         const pairSecret = window.LanPairing.secretMap.get(roomSecret);
 
+        this._stopWaiting();
         PersistentStorage
-            .addRoomSecret(roomSecret, pairSecret, displayName, deviceName)
+            .addRoomSecret(roomSecret, pairSecret, displayName, deviceName, this.pairMethod)
             .then(_ => {
                 Events.fire('notify-user', Localization.getTranslation("notifications.pairing-success"));
                 this._evaluateNumberRoomSecrets();
@@ -1564,8 +1696,18 @@ class PairDeviceDialog extends Dialog {
             });
     }
 
-    _onPublicRoomJoinKeyInvalid() {
+    /** 配对码不对：房间不存在（对方没在等 / 码输错 / 码已作废）。 */
+    _onPairDeviceJoinKeyInvalid() {
+        this._stopWaiting();
         Events.fire('notify-user', Localization.getTranslation("notifications.pairing-key-invalid"));
+    }
+
+    /** 对方关了配对窗口或点了取消——本端不该继续傻等。 */
+    _onPairDevicePeerCanceled() {
+        if (!this.isShown()) return;
+        this._stopWaiting();
+        Events.fire('notify-user', Localization.getTranslation("notifications.pairing-peer-canceled"));
+        this._pairDeviceCancel();
     }
 
     _close() {
@@ -1573,17 +1715,25 @@ class PairDeviceDialog extends Dialog {
     }
 
     _pairDeviceCancel() {
+        // 把房间 id 一起报给服务器：加入方没有 pendingPairRoom，服务器要靠这个值
+        // 才能通知还在等待的另一方"对方已取消"。
+        const roomId = this.roomSecret
+            || (this.pairSecret ? window.LanPairing.deriveRoomId(this.pairSecret) : null);
         this.hide();
         this._cleanUp();
-        Events.fire('pair-device-cancel');
+        Events.fire('pair-device-cancel', {roomId: roomId});
     }
 
     _cleanUp() {
         this.roomSecret = null;
         this.pairSecret = null;
+        this.pairMethod = null;
         this.$keyInput.value = '';
         this.$keyInput.setAttribute('disabled', true);
         this.$pairSubmitBtn.setAttribute('disabled', true);
+        this.$copyCodeBtn.setAttribute('hidden', true);
+        this.$regenerateBtn.setAttribute('hidden', true);
+        this._updateKeyHint('');
         this.pairPeer = {};
     }
 
@@ -1612,6 +1762,310 @@ class PairDeviceDialog extends Dialog {
     }
 }
 
+/**
+ * 点选配对对话框：在局域网设备列表里点一台设备直接配对，不用手抄 26 字符配对码。
+ *
+ * 流程（临时 ECDH + 6 位 SAS 人工核对）：
+ *   1. 发起方生成一对临时 X25519 密钥，把公钥发给对方；
+ *   2. 对方点"接受"后也生成一对，把公钥回给发起方；
+ *   3. 双方各自算出同一个 ECDH 共享密钥，取其哈希的前 6 位数字显示在屏幕上，
+ *      由两台设备前的人核对是否一致（蓝牙 / WhatsApp 式的数字比对）；
+ *   4. 双方都点"数字一致"后，各自**本地**从同一个共享密钥派生配对密钥 S'——
+ *      它不需要在网络上传输，之后走的就是与扫码/手输完全一样的秘密房间链路。
+ *
+ * 为什么这样是安全的：中间人（例如中毒的服务器）若把两边的握手转接起来，两侧
+ * 的 ECDH 结果不同，屏上显示的 6 位数字就必然不同，人眼一比对即可发现。6 位数字
+ * 本身不是密钥、也不参与密钥生成，所以不存在"6 位熵太低可暴力破解"的问题。
+ */
+class PairClickDialog extends Dialog {
+
+    /** 等对方接受 / 等对方确认数字的超时。 */
+    static get RESPONSE_TIMEOUT_MS() { return 30000; }
+
+    constructor() {
+        super('pair-click-dialog');
+        this.$peerName = this.$el.querySelector('.pair-click-peer');
+        this.$sas = this.$el.querySelector('.pair-click-sas');
+        this.$hint = this.$el.querySelector('.pair-click-hint');
+        this.$confirmBtn = this.$el.querySelector('#pair-click-confirm');
+        this.$closeBtn = this.$el.querySelector('[close]');
+
+        this.$confirmBtn.addEventListener('click', _ => this._onConfirmClicked());
+        this.$closeBtn.addEventListener('click', _ => this._cancel());
+
+        Events.on('pair-click-start', e => this._startWith(e.detail.peerId));
+        Events.on('pair-click', e => this._onMessage(e.detail));
+        Events.on('keydown', e => this._onKeyDown(e));
+
+        this._reset();
+    }
+
+    _reset() {
+        this._phase = null;              // 'waiting-accept' | 'accept' | 'compare'
+        this._peerId = null;
+        this._keyPair = null;
+        this._peerPublicKey = null;
+        this._shared = null;
+        this._key = null;
+        this._sas = null;
+        this._confirmedByUs = false;
+        this._confirmedByPeer = false;
+        this._finalized = false;
+        this._clearTimeout();
+    }
+
+    _clearTimeout() {
+        if (this._timeoutTimer) clearTimeout(this._timeoutTimer);
+        this._timeoutTimer = null;
+    }
+
+    _startTimeout(key) {
+        this._clearTimeout();
+        this._timeoutTimer = setTimeout(() => {
+            this.$hint.innerText = Localization.getTranslation(key);
+            this.$confirmBtn.setAttribute('disabled', true);
+        }, PairClickDialog.RESPONSE_TIMEOUT_MS);
+    }
+
+    _onKeyDown(e) {
+        if (!this.isShown()) return;
+        if (e.code === 'Escape') setTimeout(() => this._cancel(), 50);
+    }
+
+    /** 本端作为发起方：选中了列表里的某台设备。 */
+    _startWith(peerId) {
+        if (!peerId || this.isShown()) return;
+        // 同浏览器的另一个标签页不是一台独立设备，配对没有意义。
+        if (BrowserTabsConnector.peerIsSameBrowser(peerId)) {
+            Events.fire('notify-user', Localization.getTranslation("notifications.pairing-tabs-error"));
+            return;
+        }
+        this._reset();
+        this._peerId = peerId;
+        this._phase = 'waiting-accept';
+        this._keyPair = window.LanPairing.generateEphemeralKeyPair();
+        this._renderPeerName(peerId);
+        this.$sas.innerText = '··· ···';
+        this.$hint.innerText = Localization.getTranslation("dialogs.click-pair-waiting-accept");
+        this._setConfirmLabel("dialogs.click-pair-confirm", false);
+        this.show();
+        this._startTimeout("dialogs.click-pair-no-response");
+        Events.fire('pair-click-send', {
+            peerId: peerId,
+            payload: {
+                type: 'pair-click-request',
+                pk: window.LanPairing._toHex(this._keyPair.publicKey)
+            }
+        });
+    }
+
+    _onMessage(message) {
+        if (!message || !message.type || !message.sender) return;
+        const fromId = message.sender.id;
+
+        switch (message.type) {
+            case 'pair-click-request':
+                this._onRequest(fromId, message.pk);
+                break;
+            case 'pair-click-accept':
+                if (fromId !== this._peerId) return;
+                this._onAccept(message.pk);
+                break;
+            case 'pair-click-reject':
+                if (fromId !== this._peerId) return;
+                this._onRejected();
+                break;
+            case 'pair-click-confirm':
+                if (fromId !== this._peerId) return;
+                this._onPeerConfirm(message);
+                break;
+        }
+    }
+
+    /** 别人点了"配对此设备"。 */
+    _onRequest(peerId, publicKeyHex) {
+        const peerPublicKey = window.LanPairing._fromHex(publicKeyHex, 32);
+        if (!peerPublicKey) return;
+        // 同一台设备已经在和其他设备配对中：明确拒绝，避免两场配对互相干扰。
+        if (this.isShown() || this._peerId) {
+            Events.fire('pair-click-send', {
+                peerId: peerId,
+                payload: {type: 'pair-click-reject'}
+            });
+            return;
+        }
+
+        this._reset();
+        this._peerId = peerId;
+        this._peerPublicKey = peerPublicKey;
+        this._phase = 'accept';
+        this._renderPeerName(peerId);
+        this.$sas.innerText = '··· ···';
+        this.$hint.innerText = Localization.getTranslation("dialogs.click-pair-request-hint");
+        this._setConfirmLabel("dialogs.click-pair-accept", true);
+        this.show();
+        this._startTimeout("dialogs.click-pair-no-response");
+    }
+
+    _onAccept(publicKeyHex) {
+        const peerPublicKey = window.LanPairing._fromHex(publicKeyHex, 32);
+        if (!peerPublicKey || this._phase !== 'waiting-accept') return;
+        this._peerPublicKey = peerPublicKey;
+        this._enterComparePhase();
+    }
+
+    _onRejected() {
+        if (this._finalized) return;
+        this._clearTimeout();
+        Events.fire('notify-user', Localization.getTranslation("notifications.pairing-declined"));
+        this.hide();
+        this._reset();
+    }
+
+    /** 对方点了"数字一致，确认"：用握手密钥解开它，核对里面的 SAS 是否与我们相同。 */
+    _onPeerConfirm(message) {
+        if (!this._key || this._phase !== 'compare') return;
+        let inner;
+        try {
+            const frame = new Uint8Array(base64ToArrayBuffer(message.data));
+            const plain = window.Chacha.chacha20poly1305(this._key, frame.subarray(0, 12))
+                .decrypt(frame.subarray(12));
+            inner = JSON.parse(new TextDecoder().decode(plain));
+        } catch (e) {
+            // 解不开 = 对方并没有同一把密钥（中间人转接 / 数据被改），配对必须失败。
+            this._fail(Localization.getTranslation("notifications.pairing-verification-failed"));
+            return;
+        }
+        if (inner.sas !== this._sas) {
+            // 对方屏幕上显示的数字与我们不同 —— 典型的中间人特征。
+            this._fail(Localization.getTranslation("notifications.pairing-sas-mismatch"));
+            return;
+        }
+        this._confirmedByPeer = true;
+        this._maybeFinalize();
+    }
+
+    _enterComparePhase() {
+        this._shared = window.LanPairing.ecdh(this._keyPair.secretKey, this._peerPublicKey);
+        this._key = window.LanPairing.deriveClickPairKey(this._shared, this._keyPair.publicKey, this._peerPublicKey);
+        this._sas = window.LanPairing.deriveClickPairSas(this._shared, this._keyPair.publicKey, this._peerPublicKey);
+
+        this._phase = 'compare';
+        this.$sas.innerText = window.LanPairing.formatSas(this._sas);
+        this.$hint.innerText = Localization.getTranslation("dialogs.click-pair-compare-hint");
+        this._setConfirmLabel("dialogs.click-pair-confirm", true);
+        this._startTimeout("dialogs.click-pair-no-response");
+    }
+
+    _onConfirmClicked() {
+        if (this._phase === 'accept') {
+            // 接受：把自己的临时公钥回给对方。
+            this._keyPair = window.LanPairing.generateEphemeralKeyPair();
+            Events.fire('pair-click-send', {
+                peerId: this._peerId,
+                payload: {
+                    type: 'pair-click-accept',
+                    pk: window.LanPairing._toHex(this._keyPair.publicKey)
+                }
+            });
+            this._enterComparePhase();
+            this.$hint.innerText = Localization.getTranslation("dialogs.click-pair-compare-hint");
+            return;
+        }
+        if (this._phase === 'compare') {
+            if (!this._confirmedByUs) {
+                this._confirmedByUs = true;
+                // 确认包用握手密钥加密，内含本端显示的 SAS：对方据此既能验证
+                // "我们持有同一把密钥"，也能发现"两边屏幕上的数字不一样"。
+                const nonce = crypto.getRandomValues(new Uint8Array(12));
+                const plaintext = new TextEncoder().encode(JSON.stringify({sas: this._sas}));
+                const sealed = window.Chacha.chacha20poly1305(this._key, nonce).encrypt(plaintext);
+                const frame = new Uint8Array(12 + sealed.length);
+                frame.set(nonce);
+                frame.set(sealed, 12);
+                Events.fire('pair-click-send', {
+                    peerId: this._peerId,
+                    payload: {type: 'pair-click-confirm', data: arrayBufferToBase64(frame.buffer)}
+                });
+                this.$hint.innerText = Localization.getTranslation("dialogs.click-pair-confirmed-waiting-peer");
+                this.$confirmBtn.setAttribute('disabled', true);
+            }
+            this._maybeFinalize();
+        }
+    }
+
+    _maybeFinalize() {
+        if (this._finalized || !this._confirmedByUs || !this._confirmedByPeer) return;
+        this._finalized = true;
+        this._clearTimeout();
+
+        // 配对密钥 S' 由双方各自的 ECDH 结果本地派生，两端算出的相同，不经网络传输。
+        const secret = window.LanPairing.deriveClickPairSecret(
+            this._shared, this._keyPair.publicKey, this._peerPublicKey);
+        const roomId = window.LanPairing.deriveRoomId(secret);
+        window.LanPairing.secretMap.set(roomId, secret);
+
+        const $peer = $(this._peerId);
+        const displayName = $peer ? $peer.ui._peer.name.displayName : null;
+        const deviceName = $peer ? $peer.ui._peer.name.deviceName : null;
+
+        const peerId = this._peerId;
+        this.hide();
+        this._reset();
+
+        PersistentStorage
+            .addRoomSecret(roomId, secret, displayName, deviceName, 'click')
+            .then(_ => {
+                Events.fire('notify-user', Localization.getTranslation("notifications.pairing-success"));
+                // 通知服务器把本端加入这个秘密房间：之后的会话密钥握手、每会话
+                // 临时密钥、文件传输都与扫码/手输配对的设备完全一致。
+                Events.fire('room-secrets', [roomId]);
+                Events.fire('evaluate-number-room-secrets');
+            })
+            .catch(_ => {
+                Events.fire('notify-user', Localization.getTranslation("notifications.pairing-not-persistent"));
+                PersistentStorage.logBrowserNotCapable();
+            });
+    }
+
+    _fail(message) {
+        this._clearTimeout();
+        this.hide();
+        this._reset();
+        Events.fire('notify-user', {message: message});
+    }
+
+    _renderPeerName(peerId) {
+        const $peer = $(peerId);
+        const name = $peer ? $peer.ui._peer.name : null;
+        this.$peerName.innerText = name
+            ? `${name.displayName} （${name.deviceName}）`
+            : '';
+    }
+
+    _setConfirmLabel(translationKey, enabled) {
+        this.$confirmBtn.innerText = Localization.getTranslation(translationKey);
+        if (enabled) this.$confirmBtn.removeAttribute('disabled');
+        else this.$confirmBtn.setAttribute('disabled', true);
+    }
+
+    /** 关闭/取消：还没进入数字核对阶段时告诉对方一声，别让对方干等。 */
+    _cancel() {
+        const peerId = this._peerId;
+        const phase = this._phase;
+        const informed = this._finalized;
+        this._clearTimeout();
+        this.hide();
+        this._reset();
+        if (peerId && !informed && (phase === 'accept' || phase === 'waiting-accept')) {
+            Events.fire('pair-click-send', {
+                peerId: peerId,
+                payload: {type: 'pair-click-reject'}
+            });
+        }
+    }
+}
+
 class EditPairedDevicesDialog extends Dialog {
     constructor() {
         super('edit-paired-devices-dialog');
@@ -1621,8 +2075,35 @@ class EditPairedDevicesDialog extends Dialog {
         $('edit-paired-devices').addEventListener('click', _ => this._onEditPairedDevices());
         this.$footerBadgePairedDevices.addEventListener('click', _ => this._onEditPairedDevices());
 
+        this.$unpairAllBtn = this.$el.querySelector('#unpair-all');
+        this.$unpairAllBtn.addEventListener('click', _ => this._onUnpairAllClicked());
+
         Events.on('peer-display-name-changed', e => this._onPeerDisplayNameChanged(e));
         Events.on('keydown', e => this._onKeyDown(e));
+    }
+
+    /**
+     * 解除全部配对。一次删掉所有设备的配对密钥，误触代价不小，所以要求再点一次
+     * 确认（应用里一贯不用系统 confirm() 弹窗，保持界面风格一致）。
+     */
+    _onUnpairAllClicked() {
+        if (!this._unpairAllConfirming) {
+            this._unpairAllConfirming = true;
+            this.$unpairAllBtn.innerText = Localization.getTranslation("dialogs.unpair-all-confirm");
+            this._unpairAllTimer = setTimeout(() => this._resetUnpairAll(), 5000);
+            return;
+        }
+        this._resetUnpairAll();
+        this._clearRoomSecrets();
+    }
+
+    _resetUnpairAll() {
+        clearTimeout(this._unpairAllTimer);
+        this._unpairAllTimer = null;
+        this._unpairAllConfirming = false;
+        if (this.$unpairAllBtn) {
+            this.$unpairAllBtn.innerText = Localization.getTranslation("dialogs.unpair-all");
+        }
     }
 
     _onKeyDown(e) {
@@ -1637,6 +2118,15 @@ class EditPairedDevicesDialog extends Dialog {
         const pairedDeviceRemovedString = Localization.getTranslation("dialogs.paired-device-removed");
         const unpairString = Localization.getTranslation("dialogs.unpair").toUpperCase();
         const autoAcceptString = Localization.getTranslation("dialogs.auto-accept").toLowerCase();
+        const aliasPlaceholder = Localization.getTranslation("dialogs.device-alias-placeholder");
+        const unknownString = Localization.getTranslation("dialogs.pair-method-unknown");
+        const lastConnectedLabel = Localization.getTranslation("dialogs.last-connected");
+        const methodStrings = {
+            qr: Localization.getTranslation("dialogs.pair-method-qr"),
+            code: Localization.getTranslation("dialogs.pair-method-code"),
+            click: Localization.getTranslation("dialogs.pair-method-click")
+        };
+        const escapeHtml = Localization.escapeHTML;
         const roomSecretsEntries = await PersistentStorage.getAllRoomSecretEntries();
 
         roomSecretsEntries
@@ -1645,16 +2135,28 @@ class EditPairedDevicesDialog extends Dialog {
                 $pairedDevice.classList.add("paired-device");
                 $pairedDevice.setAttribute('placeholder', pairedDeviceRemovedString);
 
+                // 别名只存在本机：对方改了自己的显示名也不会覆盖你给它起的名字。
+                // 留空则退回对方的显示名（显示在 placeholder 里）。
+                const lastConnected = roomSecretsEntry.last_connected
+                    ? new Date(roomSecretsEntry.last_connected).toLocaleString()
+                    : unknownString;
+
                 $pairedDevice.innerHTML = `
                     <div class="display-name">
-                        <span class="fw">
-                            ${roomSecretsEntry.display_name}
-                        </span>
+                        <input class="alias-input fw" type="text" maxlength="32"
+                               autocomplete="off" spellcheck="false"
+                               placeholder="${escapeHtml(roomSecretsEntry.display_name || aliasPlaceholder)}"
+                               value="${escapeHtml(roomSecretsEntry.alias || '')}"
+                               aria-label="${escapeHtml(aliasPlaceholder)}">
                     </div>
                     <div class="device-name">
                         <span class="fw">
-                            ${roomSecretsEntry.device_name}
+                            ${escapeHtml(roomSecretsEntry.device_name)}
                         </span>
+                    </div>
+                    <div class="pair-meta font-subheading">
+                        <span class="pair-method">${methodStrings[roomSecretsEntry.pair_method] || unknownString}</span>
+                        <span class="pair-last-connected">${escapeHtml(lastConnectedLabel)} ${escapeHtml(lastConnected)}</span>
                     </div>
                     <div class="button-wrapper row fw center wrap">
                         <div class="center grow">
@@ -1668,6 +2170,13 @@ class EditPairedDevicesDialog extends Dialog {
                         </div>
                         <button class="btn grow" type="button">${unpairString}</button>
                     </div>`
+
+                $pairedDevice
+                    .querySelector('.alias-input')
+                    .addEventListener('change', e => {
+                        PersistentStorage
+                            .updateRoomSecretAlias(roomSecretsEntry.secret, e.target.value.trim());
+                    });
 
                 $pairedDevice
                     .querySelector('input[type="checkbox"]')
@@ -1700,6 +2209,7 @@ class EditPairedDevicesDialog extends Dialog {
 
     hide() {
         super.hide();
+        this._resetUnpairAll();
         setTimeout(() => {
             this.$pairedDevicesWrapper.innerHTML = ""
         }, 300);

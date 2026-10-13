@@ -76,7 +76,7 @@ console.log('\n[1] 协议版本');
 const A = makeClient('A'), B = makeClient('B');
 await open(A); await open(B);
 const cfg = await waitMsg(A, 'ws-config');
-ok('ws-config 携带 protocolVersion=2', cfg.wsConfig.protocolVersion === 2, '(server=' + cfg.wsConfig.protocolVersion + ')');
+ok('ws-config 携带 protocolVersion=3', cfg.wsConfig.protocolVersion === 3, '(server=' + cfg.wsConfig.protocolVersion + ')');
 
 console.log('\n[2] 高熵配对密钥 S 派生');
 const S = LanPairing.generateSecret();

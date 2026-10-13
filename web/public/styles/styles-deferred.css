@@ -469,6 +469,80 @@ x-dialog:not([show]) x-paper {
     margin: 0;
 }
 
+/* 配对进行中的状态提示（等待对方加入 / 正在连接 / 正在建立加密会话）。 */
+.pair-status {
+    margin: 4px 0 0;
+}
+
+.pair-status-spinner {
+    width: 22px;
+    height: 22px;
+    border: 3px solid var(--border-color);
+    border-top-color: var(--paired-device-color);
+    border-radius: 50%;
+    animation: pair-spin 0.9s linear infinite;
+}
+
+@keyframes pair-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.pair-status-text {
+    margin: 6px 0 0;
+    opacity: 0.85;
+}
+
+/* 点选配对：两台设备上的 6 位数字必须一致，字号与配对码一样醒目。 */
+.pair-click-peer {
+    margin: 0 0 4px;
+}
+
+.pair-click-sas {
+    letter-spacing: 10px;
+    text-indent: 10px;
+}
+
+.pair-click-hint {
+    min-height: 1.2em;      /* 预留高度，避免提示出现时布局跳动 */
+    opacity: 0.85;
+    margin: 8px 0 0;
+}
+
+/* 设备卡片上的"配对"入口（只有未配对的局域网设备显示）。 */
+.pair-click-btn {
+    margin-top: 6px;
+    padding: 2px 10px;
+    font-size: 0.8rem;
+    --accent-color: var(--paired-device-color);
+}
+
+/* 已配对设备列表：本机别名输入与元信息（配对方式 / 上次连接）。 */
+.alias-input {
+    width: 100%;
+    text-align: center;
+    background: transparent;
+    border: none;
+    border-bottom: 1px dashed var(--border-color);
+    color: inherit;
+    font: inherit;
+}
+
+.alias-input:focus {
+    outline: none;
+    border-bottom-color: var(--paired-device-color);
+}
+
+.pair-meta {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    font-size: 0.75rem;
+    opacity: 0.7;
+    margin-top: 2px;
+}
+
 x-dialog h2 {
     margin-top: 5px;
     margin-bottom: 0;

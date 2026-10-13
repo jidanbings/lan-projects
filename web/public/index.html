@@ -376,6 +376,14 @@
                             </p>
                         </div>
                     </div>
+                    <!-- 配对进行中的状态提示。两侧都在等对方时，界面上必须有东西在动，
+                         否则用户不知道自己是不是"卡住了"（以前这里完全静止）。 -->
+                    <div class="row center p-2 pair-status" hidden aria-live="polite">
+                        <div class="column center fw">
+                            <div class="pair-status-spinner" aria-hidden="true"></div>
+                            <p class="center text-center font-subheading pair-status-text"></p>
+                        </div>
+                    </div>
                     <div class="hr-note">
                         <hr>
                         <div>
@@ -391,15 +399,39 @@
                                      把 l 当 1 反复输错。 -->
                                 <input type="text" class="textarea center key-input" aria-label="pair-secret-input" maxlength="26" autocorrect="off" autocomplete="off" autocapitalize="none" spellcheck="false" autofocus contenteditable placeholder disabled>
                                 <p class="center text-center key-hint" aria-live="polite"></p>
-                                <p class="center text-center key-charset-hint">
-                                    只含大写字母 A-Z 与数字 2-7（不含 0、1、8、9）
-                                </p>
+                                <p class="center text-center key-charset-hint" data-i18n-key="dialogs.key-charset-hint" data-i18n-attrs="text"></p>
                             </div>
                             <p class="font-subheading center text-center" data-i18n-key="dialogs.enter-key-from-another-device" data-i18n-attrs="text"></p>
                         </div>
                     </div>
                     <div class="btn-row row-reverse wrap">
                         <button class="btn btn-rounded btn-grey" type="submit" data-i18n-key="dialogs.pair" data-i18n-attrs="text" disabled></button>
+                        <button class="btn btn-rounded btn-grey" type="button" data-i18n-key="dialogs.cancel" data-i18n-attrs="text" close></button>
+                        <button class="btn btn-rounded btn-grey" type="button" data-i18n-key="dialogs.copy-pair-code" data-i18n-attrs="text" id="pair-copy-code" hidden></button>
+                        <button class="btn btn-rounded btn-grey" type="button" data-i18n-key="dialogs.regenerate-pair-code" data-i18n-attrs="text" id="pair-regenerate" hidden></button>
+                    </div>
+                </x-paper>
+            </x-background>
+        </form>
+    </x-dialog>
+    <!-- Click-to-pair (LAN device list) Dialog: 双方核对同一个 6 位数字 -->
+    <x-dialog id="pair-click-dialog">
+        <form action="#">
+            <x-background class="full center text-center">
+                <x-paper shadow="2">
+                    <div class="row center p-2">
+                        <h2 class="dialog-title" data-i18n-key="dialogs.click-pair-title" data-i18n-attrs="text"></h2>
+                    </div>
+                    <div class="row center p-2">
+                        <div class="column">
+                            <p class="center text-center font-subheading pair-click-peer"></p>
+                            <h1 class="center key pair-click-sas" dir="ltr">000 000</h1>
+                            <p class="center text-center key-instructions" data-i18n-key="dialogs.click-pair-sas-instructions" data-i18n-attrs="text"></p>
+                            <p class="center text-center font-subheading pair-click-hint" aria-live="polite"></p>
+                        </div>
+                    </div>
+                    <div class="btn-row row-reverse wrap">
+                        <button class="btn btn-rounded btn-grey" type="button" data-i18n-key="dialogs.click-pair-confirm" data-i18n-attrs="text" id="pair-click-confirm" disabled></button>
                         <button class="btn btn-rounded btn-grey" type="button" data-i18n-key="dialogs.cancel" data-i18n-attrs="text" close></button>
                     </div>
                 </x-paper>
@@ -424,6 +456,7 @@
                     </div>
                     <div class="center row-reverse btn-row wrap">
                         <button class="btn btn-rounded btn-grey" type="button" data-i18n-key="dialogs.close" data-i18n-attrs="text" close></button>
+                        <button class="btn btn-rounded btn-grey" type="button" data-i18n-key="dialogs.unpair-all" data-i18n-attrs="text" id="unpair-all"></button>
                     </div>
                 </x-paper>
             </x-background>

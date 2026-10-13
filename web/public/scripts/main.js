@@ -18,6 +18,8 @@ class LanProjects {
             "scripts/libs/chacha20.js",
             // HKDF-SHA256 / HMAC-SHA256 for key derivation (pair-room id + session key)
             "scripts/libs/crypto-util.js",
+            // X25519 ECDH: 点选配对的临时密钥协商 + 每会话换钥（前向保密）
+            "scripts/libs/x25519.js",
             "scripts/network.js",
             "scripts/ui.js",
             "scripts/libs/heic2any.min.js",
@@ -179,6 +181,7 @@ class LanProjects {
         this.sendTextDialog = new SendTextDialog();
         this.receiveTextDialog = new ReceiveTextDialog();
         this.pairDeviceDialog = new PairDeviceDialog();
+        this.pairClickDialog = new PairClickDialog();
         this.clearDevicesDialog = new EditPairedDevicesDialog();
         this.publicRoomDialog = new PublicRoomDialog();
         this.base64Dialog = new Base64Dialog();
@@ -218,7 +221,7 @@ class LanProjects {
         if (urlParams.has('secret')) {
             // 扫码带出高熵配对密钥 S（26 字符 base32），自动加入配对。
             const secret = urlParams.get('secret');
-            this.pairDeviceDialog._pairDeviceJoin(secret);
+            this.pairDeviceDialog._pairDeviceJoin(secret, {fromQr: true});
         }
         else if (urlParams.has('room_id')) {
             const roomId = urlParams.get('room_id');
