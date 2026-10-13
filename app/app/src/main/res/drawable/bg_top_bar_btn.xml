@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Transfer page (MainActivity) top-bar buttons: compact flat pill, slightly
+     darker than the #ECEFF1 top bar so it reads as tappable without a heavy
+     border. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#E0E4E8" />
+    <corners android:radius="8dp" />
+</shape>

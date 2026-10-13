@@ -1,0 +1,2205 @@
+// 配对 / 加密协议版本。服务器在 ws-config 中下发自己的版本，客户端不符即提示
+// 刷新或更新，而不是静默出现怪异行为（两端协议不一致时握手会失败，明确提示
+// 比让用户面对"传不了文件但没有任何报错"要好）。
+const LAN_PROTOCOL_VERSION = 1;
+
+// ---------------------------------------------------------------------------
+// 配对密钥助手（零信任服务器：S 永远不出设备）。
+//
+// 128 位配对密钥 S 编码为 RFC 4648 base32（A-Z 与 2-7，无填充）= 26 字符，
+// 只经离网渠道传递（二维码光学传递 / 手动输入），服务器永远见不到 S。服务器
+// 只会见到由 S 单向派生的房间路由 id R = HKDF-SHA256(S, "lan-projects-room-id-v2")，
+// HKDF 单向不可逆，无法从 R 反推 S。
+// ---------------------------------------------------------------------------
+window.LanPairing = {
+    // R（房间 id，64 位十六进制）-> S（26 字符 base32 配对密钥）。
+    // 配对过程中发起方生成 S、加入方获得 S 后先入此内存态，重连时再从持久化
+    // 存储预加载，保证 _updateRoomIds('secret', R) 触发 _initEncryption() 时
+    // 一定能取到 S（而服务器从头到尾不接触 S）。
+    secretMap: new Map(),
+
+    base32Alphabet: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567',
+    base32Regex: /^[A-Z2-7]+$/,
+
+    /** 生成 128 位（16 字节）随机配对密钥 -> 26 字符 base32。 */
+    generateSecret() {
+        const bytes = crypto.getRandomValues(new Uint8Array(16));
+        return this._bytesToBase32(bytes);
+    },
+
+    /** R = HKDF-SHA256(S, info="lan-projects-room-id-v2") -> 64 位十六进制。 */
+    deriveRoomId(secret) {
+        const out = window.CryptoUtil.hkdf(
+            window.CryptoUtil.sha256,
+            new TextEncoder().encode(secret),
+            new Uint8Array(32),                        // zero salt，固定
+            new TextEncoder().encode('lan-projects-room-id-v2'),
+            32);
+        return Array.from(out).map(b => b.toString(16).padStart(2, '0')).join('');
+    },
+
+    /** 会话密钥 key = HKDF-SHA256(S, info="lan-projects-key-v2") -> 32 字节。 */
+    deriveKey(secret) {
+        return window.CryptoUtil.hkdf(
+            window.CryptoUtil.sha256,
+            new TextEncoder().encode(secret),
+            new Uint8Array(32),                        // zero salt，固定
+            new TextEncoder().encode('lan-projects-key-v2'),
+            32);
+    },
+
+    /**
+     * 会话密钥（带前向保密）：key = HKDF-SHA256(S, salt=sessionNonce,
+     * info="lan-projects-session-key-v1")。
+     *
+     * 为什么需要它：旧实现直接用 HKDF(S) 当会话密钥，S 又是永久长期密钥，于是
+     * 同一对设备在**所有会话、所有重连**里都使用同一把密钥 —— 一旦某次会话的
+     * 密钥泄露（或被离线记录后将来 S 泄露），**过去和将来的所有会话全部可解**，
+     * 即完全没有前向保密。
+     *
+     * 现在双方为每个会话协商一个随机会话 nonce（由发起方生成、随配对确认交换），
+     * 会话密钥由 S 与该 nonce 共同派生。服务器永远看不到 S，也就无法派生任何
+     * 会话密钥；不同会话的密钥彼此独立，单个会话密钥泄露不影响其它会话。
+     *
+     * 注意：这改善的是**会话间**的隔离（每会话一钥），S 本身仍是长期秘密——
+     * 真正的 PCS（长期密钥泄露后仍安全）需要引入临时密钥协商（X25519）。
+     */
+    deriveSessionKey(secret, sessionNonce) {
+        const nonceBytes = typeof sessionNonce === 'string'
+            ? new TextEncoder().encode(sessionNonce)
+            : sessionNonce;
+        return window.CryptoUtil.hkdf(
+            window.CryptoUtil.sha256,
+            new TextEncoder().encode(secret),
+            nonceBytes,                                // salt = 会话 nonce
+            new TextEncoder().encode('lan-projects-session-key-v1'),
+            32);
+    },
+
+    /** 生成一个 32 字节随机会话 nonce，编码为 hex（用于每会话换钥）。 */
+    generateSessionNonce() {
+        const bytes = crypto.getRandomValues(new Uint8Array(32));
+        return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    },
+
+    /** 是否形如合法的 26 字符 base32 配对码。 */
+    isValidCode(code) {
+        return typeof code === 'string'
+            && code.length === 26
+            && this.base32Regex.test(code);
+    },
+
+    /** 大写、去连字符/空格、剔除非 base32 字符。粘贴输入也走这里。 */
+    normalizeCode(code) {
+        return (code || '').toUpperCase().replace(/[- ]/g, '').replace(/[^A-Z2-7]/g, '');
+    },
+
+    /** 分组显示，如 "ABCDEFGHI-JKLMNOPQR-STUVWX2"。 */
+    formatCode(code) {
+        return code.match(/.{1,9}/g).join('-');
+    },
+
+    _bytesToBase32(bytes) {
+        // 每 5 位映射一个字符；缓冲不超过 12 位，避免 32 位整型截断。
+        let out = '';
+        let buffer = 0;
+        let bits = 0;
+        for (let i = 0; i < bytes.length; i++) {
+            buffer = (buffer << 8) | bytes[i];
+            bits += 8;
+            while (bits >= 5) {
+                out += this.base32Alphabet[(buffer >>> (bits - 5)) & 31];
+                bits -= 5;
+            }
+        }
+        if (bits > 0) {
+            out += this.base32Alphabet[(buffer << (5 - bits)) & 31];
+        }
+        return out;   // 16 字节 = 128 位 -> 恰好 26 个 base32 字符，无填充
+    }
+};
+
+class ServerConnection {
+
+    // Set by a 'ws-chunk-prep' message: the peer id whose binary chunk is next.
+    // Binary WebSocket frames carry no routing info, so the sender announces
+    // the recipient first (JSON) and the receiver remembers who sent it.
+    // _pendingBinaryFromCount is how many further binary frames that prep still
+    // authorizes (the sender grants a whole partition at once, see Peer._send).
+    _pendingBinaryFrom = null;
+    _pendingBinaryFromCount = 0;
+
+    // A navigator.connection change was seen while the page was hidden (system
+    // file picker open / screen off) and was deferred. Applied on return to the
+    // foreground by _onVisibilityChange, because a reconnect cannot complete in
+    // a suspended renderer and would just leave the socket dead.
+    _pendingReconnect = false;
+
+    // Client-side heartbeat. The server answers our JSON ping with a pong; if
+    // none arrives within _heartbeatTimeout the server is presumed dead even
+    // though the socket may still report OPEN — a half-open TCP link, e.g. the
+    // host phone returned to its launch screen / exited and the hotspot radio
+    // never delivered the FIN. Without this the other device would keep showing
+    // "connected" until the OS TCP keep-alive gives up minutes later. (The
+    // server's PROTOCOL-level ping is answered by the browser's network stack,
+    // invisible to page JS, so it cannot detect server death.)
+    _heartbeatInterval = 3000;   // send a JSON ping every 3s
+    _heartbeatTimeout = 9000;    // server presumed dead if no pong for 9s
+    _heartbeatTimer = null;
+    _lastPongAt = 0;
+
+    constructor() {
+        // pagehide fires on background-hide (screen lock, app switcher, system
+        // file picker) AND on real page unload. We must NOT close the WebSocket
+        // here: closing it on a background-hide makes the other device see us
+        // drop, and because the visibility-reconnect below used to be broken, a
+        // phone whose screen locked while it waited for a file stayed
+        // "disconnected" forever. On a real unload the browser closes the
+        // socket itself, so the server still cleans us up via the TCP close.
+        // Events.on('pagehide', _ => this._disconnect());
+        Events.on(window.visibilityChangeEvent, _ => this._onVisibilityChange());
+
+        if (navigator.connection) {
+            navigator.connection.addEventListener('change', _ => {
+                // Chrome fires this on rtt/downlink/effectiveType fluctuations
+                // too, not only on network-type switches — so log the details to
+                // spot spurious reconnect triggers (which close+reopen the WS).
+                console.log('[debug] NETCONN change: type='
+                    + (navigator.connection.type || '?')
+                    + ' effectiveType=' + (navigator.connection.effectiveType || '?')
+                    + ' rtt=' + navigator.connection.rtt
+                    + ' downlink=' + navigator.connection.downlink);
+                // While the page is hidden (system file picker open / screen
+                // off) a reconnect cannot complete: the renderer is suspended,
+                // the WS handshake stalls and the socket ends up dead. Defer
+                // it; _onVisibilityChange applies it on return to the
+                // foreground. Without this, a connection-quality blip behind
+                // the file picker tears down a healthy socket and BOTH phones
+                // show disconnected ("选择文件超过 10~35 秒就断联").
+                if (this._isHidden()) {
+                    console.log('[debug] NETCONN change while hidden, deferring reconnect');
+                    this._pendingReconnect = true;
+                    return;
+                }
+                this._reconnect();
+            });
+        }
+
+        Events.on('room-secrets', e => this.send({ type: 'room-secrets', roomSecrets: e.detail }));
+        Events.on('join-ip-room', _ => this.send({ type: 'join-ip-room'}));
+        Events.on('room-secrets-deleted', e => this.send({ type: 'room-secrets-deleted', roomSecrets: e.detail}));
+        Events.on('pair-device-initiate', _ => this._onPairDeviceInitiate());
+        Events.on('pair-device-join', e => this._onPairDeviceJoin(e.detail));
+        Events.on('pair-device-cancel', _ => this.send({ type: 'pair-device-cancel' }));
+
+        Events.on('create-public-room', _ => this._onCreatePublicRoom());
+        Events.on('join-public-room', e => this._onJoinPublicRoom(e.detail.roomId, e.detail.createIfInvalid));
+        Events.on('leave-public-room', _ => this._onLeavePublicRoom());
+
+        Events.on('offline', _ => clearTimeout(this._reconnectTimer));
+        Events.on('online', _ => this._connect());
+
+        this._getConfig().then(() => this._connect());
+    }
+
+    _getConfig() {
+        console.log("Loading config...")
+        return new Promise((resolve, reject) => {
+            let xhr = new XMLHttpRequest();
+            xhr.addEventListener("load", () => {
+                if (xhr.status === 200) {
+                    // Config received
+                    let config = JSON.parse(xhr.responseText);
+                    console.log("Config loaded:", config)
+                    this._config = config;
+                    Events.fire('config', config);
+                    resolve()
+                } else if (xhr.status < 200 || xhr.status >= 300) {
+                    retry(xhr);
+                }
+            })
+
+            xhr.addEventListener("error", _ => {
+                retry(xhr);
+            });
+
+            function retry(request) {
+                setTimeout(function () {
+                    openAndSend(request)
+                }, 1000)
+            }
+
+            function openAndSend() {
+                xhr.open('GET', 'config');
+                xhr.send();
+            }
+
+            openAndSend(xhr);
+        })
+    }
+
+    _setWsConfig(wsConfig) {
+        this._wsConfig = wsConfig;
+        // 协议版本检查：客户端与服务器必须一致才能配对/传输。不一致时明确提示，
+        // 否则用户只会看到"传不了文件"而没有任何原因说明。
+        if (wsConfig.protocolVersion && wsConfig.protocolVersion !== LAN_PROTOCOL_VERSION) {
+            console.error('LAN protocol version mismatch: server='
+                + wsConfig.protocolVersion + ' client=' + LAN_PROTOCOL_VERSION);
+            Events.fire('notify-user', {
+                message: '⚠️ 协议版本不匹配，请刷新页面；App 用户请更新到最新版'
+            });
+        }
+        Events.fire('ws-config', wsConfig);
+    }
+
+    _connect() {
+        clearTimeout(this._reconnectTimer);
+        // 不能以 navigator.onLine 判断是否连接：服务器就是本页同源，
+        // 纯局域网 / 热点（无外网）时 navigator.onLine 为 false 但本地服务器可达，
+        // 以前这里会因 _isOffline() 直接 return，导致配对 / 公共房间被误拦。
+        if (this._isConnected() || this._isConnecting()) return;
+        if (this._isReconnect) {
+            Events.fire('notify-user', {
+                message: Localization.getTranslation("notifications.connecting"),
+                persistent: true
+            });
+        }
+        const ws = new WebSocket(this._endpoint());
+        ws.binaryType = 'arraybuffer';
+        ws.onopen = _ => this._onOpen();
+        ws.onmessage = e => this._onMessage(e.data);
+        ws.onclose = _ => this._onDisconnect();
+        ws.onerror = e => this._onError(e);
+        this._socket = ws;
+    }
+
+    _onOpen() {
+        console.log('[debug] WS OPEN (peer=' + (sessionStorage.getItem('peer_id') || '?') + ')');
+        console.log('WS: server connected');
+        // A reconnect landed within the grace window: cancel the pending
+        // "disconnected" UI event so a brief hotspot/link blip never shows a
+        // disconnect and never tears down the peer list.
+        clearTimeout(this._disconnectedNotifyTimer);
+        Events.fire('ws-connected');
+        // (Re)start the client heartbeat: baseline the pong timer and ping the
+        // server from now on. If the server dies later without our noticing
+        // (no close event over a half-open hotspot link), the heartbeat bounds
+        // how long the page keeps showing it as connected.
+        this._lastPongAt = Date.now();
+        this._startHeartbeat();
+        if (this._isReconnect) Events.fire('notify-user', Localization.getTranslation("notifications.connected"));
+    }
+
+    /** Start the client heartbeat: send a JSON ping every _heartbeatInterval. */
+    _startHeartbeat() {
+        this._stopHeartbeat();
+        this._heartbeatTimer = setInterval(() => {
+            if (!this._isConnected()) {
+                this._stopHeartbeat();
+                return;
+            }
+            this.send({ type: 'ping' });
+            if (Date.now() - this._lastPongAt > this._heartbeatTimeout) {
+                console.log('[debug] heartbeat timeout: no pong for '
+                    + this._heartbeatTimeout + 'ms, server presumed dead');
+                this._stopHeartbeat();
+                this._onHeartbeatTimeout();
+            }
+        }, this._heartbeatInterval);
+    }
+
+    _stopHeartbeat() {
+        if (this._heartbeatTimer) {
+            clearInterval(this._heartbeatTimer);
+            this._heartbeatTimer = null;
+        }
+    }
+
+    /**
+     * The server did not answer our pings: it is gone even though the socket may
+     * still report OPEN (the dead link never delivered a close). Tear the socket
+     * down and surface the disconnect NOW — no 5s grace, we already waited
+     * _heartbeatTimeout — then reconnect so the page recovers automatically if
+     * the server comes back.
+     */
+    _onHeartbeatTimeout() {
+        this._teardownSocket();
+        this._isReconnect = true;
+        Events.fire('ws-disconnected');
+        this._reconnectTimer = setTimeout(() => this._connect(), 1000);
+    }
+
+    _onPairDeviceInitiate() {
+        if (!this._isConnected()) {
+            Events.fire('notify-user', Localization.getTranslation("notifications.online-requirement-pairing"));
+            return;
+        }
+        // 密钥 S 本地生成，只把派生的房间 id R 发给服务器——服务器永远见不到 S。
+        const secret = window.LanPairing.generateSecret();
+        const roomId = window.LanPairing.deriveRoomId(secret);
+        window.LanPairing.secretMap.set(roomId, secret);
+        this.send({ type: 'pair-device-initiate', roomId: roomId });
+        // 本地事件携带 S，供 UI 展示二维码/配对码。不等服务器应答：恶意服务器
+        // 只能影响配对能否成功，不能影响展示的码的正确性（码是本地生成的）。
+        Events.fire('pair-device-initiated', { roomId: roomId, secret: secret });
+    }
+
+    _onPairDeviceJoin(secret) {
+        if (!this._isConnected()) {
+            setTimeout(() => this._onPairDeviceJoin(secret), 1000);
+            return;
+        }
+        secret = window.LanPairing.normalizeCode(secret);
+        if (!window.LanPairing.isValidCode(secret)) {
+            Events.fire('notify-user', Localization.getTranslation("notifications.pairing-key-invalid"));
+            return;
+        }
+        const roomId = window.LanPairing.deriveRoomId(secret);
+        window.LanPairing.secretMap.set(roomId, secret);
+        this.send({ type: 'pair-device-join', roomId: roomId });
+    }
+
+    _onCreatePublicRoom() {
+        if (!this._isConnected()) {
+            Events.fire('notify-user', Localization.getTranslation("notifications.online-requirement-public-room"));
+            return;
+        }
+        this.send({ type: 'create-public-room' });
+    }
+
+    _onJoinPublicRoom(roomId, createIfInvalid) {
+        if (!this._isConnected()) {
+            setTimeout(() => this._onJoinPublicRoom(roomId), 1000);
+            return;
+        }
+        this.send({ type: 'join-public-room', publicRoomId: roomId, createIfInvalid: createIfInvalid });
+    }
+
+    _onLeavePublicRoom() {
+        if (!this._isConnected()) {
+            setTimeout(() => this._onLeavePublicRoom(), 1000);
+            return;
+        }
+        this.send({ type: 'leave-public-room' });
+    }
+
+    _onMessage(msg) {
+        // A non-string message is a raw binary file chunk (WebSocket binary
+        // frame). The server announces the sender just before it via a
+        // 'ws-chunk-prep' message, which set _pendingBinaryFrom.
+        if (typeof msg !== 'string') {
+            // 一个 prep 现在可以授权多个连续二进制帧（发送方按 partition 批量
+            // 授权，见 Peer._send / ws-server._onWsChunkPrep），所以这里递减计数，
+            // 而不是每帧都依赖一条新的 prep。
+            if (this._pendingBinaryFromCount > 0) this._pendingBinaryFromCount--;
+            Events.fire('ws-binary', { from: this._pendingBinaryFrom, data: msg });
+            return;
+        }
+        msg = JSON.parse(msg);
+        // Only log important non-frequent messages (UI already shows the rest)
+        const noisy = ['ping','pong','ws-chunk','ws-chunk-prep','e2e','partition','partition-received','progress',
+            'file-transfer-complete','message-transfer-complete','peer-joined','peer-left',
+            'files-transfer-response','request','header','text','display-name-changed','signal'];
+        if (!noisy.includes(msg.type)) {
+            console.log('WS receive:', msg);
+        }
+        switch (msg.type) {
+            case 'ws-chunk-prep':
+                // count 授权后续多少个二进制帧都来自同一发送方（默认 1，兼容旧服务端）。
+                this._pendingBinaryFrom = msg.from;
+                this._pendingBinaryFromCount = Number.isFinite(msg.count) ? msg.count : 1;
+                break;
+            case 'ws-config':
+                this._setWsConfig(msg.wsConfig);
+                break;
+            case 'peers':
+                this._onPeers(msg);
+                break;
+            case 'peer-joined':
+                Events.fire('peer-joined', msg);
+                break;
+            case 'peer-left':
+                Events.fire('peer-left', msg);
+                break;
+            case 'signal':
+                Events.fire('signal', msg);
+                break;
+            case 'ping':
+                this.send({ type: 'pong' });
+                break;
+            case 'pong':
+                // Reply to our heartbeat ping — proves the server is still alive.
+                this._lastPongAt = Date.now();
+                break;
+            case 'display-name':
+                this._onDisplayName(msg);
+                break;
+            case 'pair-device-initiated':
+                // 服务器确认房间创建成功。UI 已收到本地事件（携带 S），此处忽略。
+                break;
+            case 'pair-device-joined':
+                Events.fire('pair-device-joined', msg);
+                break;
+            case 'pair-device-join-key-invalid':
+                Events.fire('pair-device-join-key-invalid');
+                break;
+            case 'pair-device-canceled':
+                Events.fire('pair-device-canceled');
+                break;
+            case 'join-key-rate-limit':
+                Events.fire('notify-user', Localization.getTranslation("notifications.rate-limit-join-key"));
+                break;
+            case 'secret-room-deleted':
+                Events.fire('secret-room-deleted', msg.roomSecret);
+                break;
+            case 'public-room-id-invalid':
+                Events.fire('public-room-id-invalid', msg.publicRoomId);
+                break;
+            case 'public-room-created':
+                Events.fire('public-room-created', msg.roomId);
+                break;
+            case 'public-room-left':
+                Events.fire('public-room-left');
+                break;
+            case 'e2e':
+                // 端到端加密信封（request/header/partition/text/e2e-confirm 的外层
+                // 壳）。与其它 ws-fallback 中继消息一样转发给 Peer 处理：Peer._onMessage
+                // 的 case 'e2e' 会解密并分派内层消息。漏掉这一支会让所有加密信封在
+                // ServerConnection 层被丢弃——文件传输彻底失效而配对仍显示成功。
+            case 'request':
+            case 'header':
+            case 'partition':
+            case 'partition-received':
+            case 'progress':
+            case 'files-transfer-response':
+            case 'file-transfer-complete':
+            case 'message-transfer-complete':
+            case 'text':
+            case 'display-name-changed':
+                // ws-fallback
+                if (this._wsConfig.wsFallback) {
+                    Events.fire('ws-relay', JSON.stringify(msg));
+                }
+                else {
+                    console.log("WS receive: message type is for websocket fallback only but websocket fallback is not activated on this instance.")
+                }
+                break;
+            case 'ws-chunk':
+                // ws-fallback
+                if (this._wsConfig.wsFallback) {
+                    Events.fire('ws-relay', JSON.stringify(msg));
+                }
+                else {
+                    console.log("WS receive: message type is for websocket fallback only but websocket fallback is not activated on this instance.")
+                }
+                break;
+            default:
+                console.error('WS receive: unknown message type', msg);
+        }
+    }
+
+    send(msg) {
+        if (!this._isConnected()) return;
+        // Only log important messages (UI already shows file transfers, peer events, etc.)
+        const noisy = ['ping','pong','ws-chunk','ws-chunk-prep','e2e','partition','partition-received','progress',
+            'file-transfer-complete','message-transfer-complete','signal','request','header'];
+        if (!noisy.includes(msg.type)) {
+            console.log("WS send:", msg)
+        }
+        this._socket.send(JSON.stringify(msg));
+    }
+
+    /** Send raw binary data (a file chunk) as a binary WebSocket frame. */
+    sendBinary(data) {
+        if (!this._isConnected()) return;
+        this._socket.send(data);
+    }
+
+    _onPeers(msg) {
+        // Debug: record exactly what the server told us is in this room, so the
+        // Android 查看日志 screen can show whether a fresh server really sends
+        // an empty peer list or whether it is sending stale peers.
+        console.log('[debug] server sent peers, count='
+            + (msg.peers ? msg.peers.length : 0)
+            + ' room=' + msg.roomType + ':' + msg.roomId
+            + ' names=' + (msg.peers || []).map(p => p.name ? p.name.deviceName : '?').join(','));
+        Events.fire('peers', msg);
+    }
+
+    _onDisplayName(msg) {
+        // Add peerId and peerIdHash to sessionStorage to authenticate as the same device on page reload
+        sessionStorage.setItem('peer_id', msg.peerId);
+        sessionStorage.setItem('peer_id_hash', msg.peerIdHash);
+
+        // Add peerId to localStorage to mark it for other lan-projects tabs on the same browser
+        BrowserTabsConnector
+            .addPeerIdToLocalStorage()
+            .then(peerId => {
+                if (!peerId) return;
+
+                // Only now join rooms
+                Events.fire('join-ip-room');
+                PersistentStorage.getAllRoomSecretEntries()
+                    .then(roomSecretEntries => {
+                        // 预加载 R->S 内存映射，重连后按 R 重派生会话密钥。
+                        // S 只在本地内存/持久化里，服务器永远见不到。
+                        for (const entry of roomSecretEntries) {
+                            if (entry && entry.secret && entry.pair_secret) {
+                                window.LanPairing.secretMap.set(entry.secret, entry.pair_secret);
+                            }
+                        }
+                        Events.fire('room-secrets',
+                            roomSecretEntries.map(e => e.secret).filter(Boolean));
+                    });
+            });
+
+        Events.fire('display-name', msg);
+    }
+
+    _endpoint() {
+        const protocol = location.protocol.startsWith('https') ? 'wss' : 'ws';
+        // Check whether the instance specifies another signaling server otherwise use the current instance for signaling
+        let wsServerDomain = this._config.signalingServer
+            ? this._config.signalingServer
+            : location.host + location.pathname;
+
+        let wsUrl = new URL(protocol + '://' + wsServerDomain + 'server');
+
+        wsUrl.searchParams.append('webrtc_supported', window.isRtcSupported ? 'true' : 'false');
+
+        const peerId = sessionStorage.getItem('peer_id');
+        const peerIdHash = sessionStorage.getItem('peer_id_hash');
+        if (peerId && peerIdHash) {
+            wsUrl.searchParams.append('peer_id', peerId);
+            wsUrl.searchParams.append('peer_id_hash', peerIdHash);
+        }
+
+        return wsUrl.toString();
+    }
+
+    _disconnect() {
+        this.send({ type: 'disconnect' });
+
+        const peerId = sessionStorage.getItem('peer_id');
+        BrowserTabsConnector
+            .removePeerIdFromLocalStorage(peerId)
+            .then(_ => {
+                console.log("successfully removed peerId from localStorage");
+            });
+
+        if (!this._socket) return;
+
+        this._socket.onclose = null;
+        this._socket.close();
+        this._socket = null;
+        Events.fire('ws-disconnected');
+        this._isReconnect = true;
+    }
+
+    _onDisconnect() {
+        // Record whether the page was hidden at the moment the socket closed:
+        // hidden=true means the phone was backgrounded (screen off / app
+        // switcher / file picker) and the WebView got suspended; hidden=false
+        // means the socket died while the page was foreground — a network drop
+        // or the process being frozen by the system.
+        const wasHidden = this._isHidden();
+        console.log('[debug] WS CLOSED, scheduling reconnect'
+            + ' (hidden=' + wasHidden + ')');
+        console.log('WS: server disconnected');
+        // Delay the "disconnected" UI state by 5s: if the reconnect (scheduled
+        // for 1s below) lands in time, _onOpen cancels it and the user never
+        // sees a disconnect from a transient link blip. The blip that matters
+        // here is the server phone's hotspot radio dropping the client's TCP
+        // for a second or two while the screen is off behind the system file
+        // picker (WebSocket close code 1006); 1.5s was too short — the peer
+        // list got cleared and the other device "disappeared" even though the
+        // reconnect landed a moment later. Only a genuinely dead link (still
+        // down after 5s) surfaces the disconnected UI.
+        this._disconnectedNotifyTimer = setTimeout(() => {
+            this._isReconnect = true;
+            Events.fire('ws-disconnected');
+        }, 5000);
+        this._reconnectTimer = setTimeout(() => this._connect(), 1000);
+    }
+
+    _onVisibilityChange() {
+        // Reconnect when the page becomes visible again (returning from the
+        // system file picker / app switcher / screen unlock). The old code
+        // tested `window.hiddenProperty` — a property-name STRING like 'hidden'
+        // that is always truthy — so it always returned early and this reconnect
+        // path NEVER ran, leaving a backgrounded phone stuck disconnected.
+        // _connect() is a no-op when already connected, so calling it whenever
+        // the page is visible is safe.
+        const hidden = this._isHidden();
+        // Log every visibility transition, hidden included, so the phone's own
+        // log shows whether its page went to the background around a disconnect.
+        console.log('[debug] VISIBILITY ' + (hidden ? 'hidden' : 'visible'));
+        // Tell the server when this page goes hidden / visible (screen off,
+        // app switcher, system file picker). Its log then shows whether a
+        // peer's disconnect coincided with that page being hidden — how we
+        // distinguish a "backgrounded phone's WebView closed the socket" from a
+        // genuine network drop.
+        if (this._isConnected()) {
+            this.send({ type: 'visibility', hidden: hidden });
+        }
+        if (hidden) return;
+        console.log('[debug] VISIBILITY visible, reconnecting if needed');
+        // A navigator.connection change was seen while this page was hidden
+        // (behind the file picker / screen off). The socket may be a stale OPEN
+        // on a dead link or a half-open CONNECTING — do not trust its
+        // readyState, tear it down and start a fresh handshake. We skip the
+        // "disconnected" UI here on purpose: the user is already coming back to
+        // the page, a reconnect flash is just noise.
+        if (this._pendingReconnect) {
+            this._pendingReconnect = false;
+            console.log('[debug] VISIBILITY visible, applying deferred reconnect');
+            this._teardownSocket();
+            this._isReconnect = true;
+            this._connect();
+            return;
+        }
+        // A reconnect started while hidden (the 1s retry timer in _onDisconnect)
+        // can leave the socket stuck in CONNECTING — the handshake cannot finish
+        // in a suspended renderer, and _connect() refuses to run while
+        // _isConnecting() is true. Close it so we start a fresh handshake.
+        if (this._socket && this._socket.readyState === this._socket.CONNECTING) {
+            console.log('[debug] VISIBILITY visible, closing stuck CONNECTING socket');
+            this._teardownSocket();
+        }
+        this._connect();
+    }
+
+    /** True while the page is hidden (backgrounded, file picker open, screen off). */
+    _isHidden() {
+        return !!(window.hiddenProperty && document[window.hiddenProperty]);
+    }
+
+    /** Close the current WebSocket without running its onclose handler. */
+    _teardownSocket() {
+        this._stopHeartbeat();
+        if (!this._socket) return;
+        try {
+            this._socket.onclose = null;
+            this._socket.close();
+        } catch (e) {
+        }
+        this._socket = null;
+    }
+
+    _isConnected() {
+        return this._socket && this._socket.readyState === this._socket.OPEN;
+    }
+
+    _isConnecting() {
+        return this._socket && this._socket.readyState === this._socket.CONNECTING;
+    }
+
+    _onError(e) {
+        console.error(e);
+    }
+
+    _reconnect() {
+        this._disconnect();
+        this._connect();
+    }
+}
+
+class Peer {
+
+    constructor(serverConnection, isCaller, peerId, roomType, roomId) {
+        this._server = serverConnection;
+        this._isCaller = isCaller;
+        this._peerId = peerId;
+
+        this._roomIds = {};
+        this._encryptionKey = null;
+        this._keyExchangeDone = false;
+
+        this._updateRoomIds(roomType, roomId);
+
+        this._filesQueue = [];
+        this._busy = false;
+
+        // evaluate auto accept
+        this._evaluateAutoAccept();
+    }
+
+    sendJSON(message) {
+        this._send(JSON.stringify(message));
+    }
+
+    // Is overwritten in expanding classes
+    _send(message) {}
+
+    sendDisplayName(displayName) {
+        this.sendJSON({type: 'display-name-changed', displayName: displayName});
+    }
+
+    _isSameBrowser() {
+        return BrowserTabsConnector.peerIsSameBrowser(this._peerId);
+    }
+
+    _isPaired() {
+        return !!this._roomIds['secret'];
+    }
+
+    /**
+     * The 128-bit pairing secret S for this peer's secret room. The server only
+     * ever sees the derived room id R (_roomIds['secret']); S lives in the local
+     * LanPairing.secretMap (populated at pairing time and preloaded on reconnect),
+     * so a compromised server never holds the key material.
+     */
+    _getPairSecret() {
+        const roomId = this._roomIds['secret'];
+        if (!roomId) return null;
+        return window.LanPairing.secretMap.get(roomId) || null;
+    }
+
+    _getRoomTypes() {
+        return Object.keys(this._roomIds);
+    }
+
+    _updateRoomIds(roomType, roomId) {
+        const roomTypeIsSecret = roomType === "secret";
+        const oldPairRoomId = this._roomIds['secret'];
+        const newPairRoomDiffers = oldPairRoomId !== roomId;
+
+        // 同一 peer 只能对应一个秘密房间。若服务器把此 peer 宣告进一个与既有
+        // 配对不同的秘密房间（错配/重配），删除旧的，保持"一个 peer 一把密钥"。
+        // 同浏览器标签页共享全部 roomSecrets，不判定、不删除。
+        if (!this._isSameBrowser()
+            && roomTypeIsSecret
+            && oldPairRoomId
+            && newPairRoomDiffers) {
+            // multiple secret rooms with same peer -> delete old roomSecret
+            PersistentStorage
+                .deleteRoomSecret(oldPairRoomId)
+                .then(deletedRoomSecret => {
+                    if (deletedRoomSecret) console.log("Successfully deleted duplicate room secret with same peer: ", deletedRoomSecret);
+                });
+        }
+
+        this._roomIds[roomType] = roomId;
+
+        // Re-evaluate the encryption key whenever a room is added (e.g. a pairing
+        // secret is established after the initial IP room). No-op if already derived.
+        this._initEncryption();
+    }
+
+    _removeRoomType(roomType) {
+        delete this._roomIds[roomType];
+
+        Events.fire('room-type-removed', {
+            peerId: this._peerId,
+            roomType: roomType
+        });
+    }
+
+    _evaluateAutoAccept() {
+        if (!this._isPaired()) {
+            this._setAutoAccept(false);
+            return;
+        }
+
+        PersistentStorage
+            .getRoomSecretEntry(this._roomIds['secret'])
+            .then(roomSecretEntry => {
+                const autoAccept = roomSecretEntry
+                    ? roomSecretEntry.entry.auto_accept
+                    : false;
+                this._setAutoAccept(autoAccept);
+            })
+            .catch(_ => {
+                this._setAutoAccept(false);
+            });
+    }
+
+    _setAutoAccept(autoAccept) {
+        this._autoAccept = !this._isSameBrowser()
+            ? autoAccept
+            : false;
+    }
+
+    // ---- End-to-end encryption ---------------------------------------------
+    // Shared by every peer connection type (WebRTC data channel and WebSocket
+    // relay), so the key derivation and cipher are identical on all clients:
+    // the web app, the Android app (same frontend in a WebView) and any future
+    // desktop app embedding the same frontend. File data is never sent without
+    // an established key.
+
+    _initEncryption() {
+        if (this._keyExchangeDone) return;
+        // Security policy: only PAIRED peers may transfer. The E2E key is
+        // HKDF-derived from the PAIRING SECRET S shared only with this peer
+        // (established out-of-band via the pairing QR / high-entropy code, so
+        // neither an on-network attacker NOR the relay server can derive it —
+        // the server never sees S). The dedup in _updateRoomIds keeps exactly
+        // one secret per peer, so both sides derive the same key and transfers
+        // never corrupt.
+        //
+        // Unpaired peers get NO key on purpose: _requireEncryption() then
+        // refuses the transfer. There is deliberately no public fallback key.
+        const secret = this._getPairSecret();
+        if (secret) {
+            // 发起方为每个连接生成新的会话 nonce（前向保密：每次连接换钥）。
+            // 加入方在收到 e2e-confirm 时采用它。
+            if (this._isCaller && !this._sessionNonce) {
+                this._sessionNonce = window.LanPairing.generateSessionNonce();
+            }
+            this._deriveKey(secret, this._sessionNonce);
+        }
+    }
+
+    _deriveKey(secret, sessionNonce) {
+        // 会话密钥 = HKDF-SHA256(ikm=S, salt=sessionNonce, info="lan-projects-session-key-v1")。
+        // 服务器拿不到 S，因此无法派生同样的 key。
+        //
+        // 前向保密：密钥由「长期配对密钥 S」与「每会话随机 nonce」共同派生，
+        // 于是每个会话的密钥彼此独立——单个会话密钥泄露不会波及其它会话。
+        // nonce 由发起方生成、随加密握手包传给加入方，双方据此收敛到同一把密钥。
+        this._sessionNonce = sessionNonce || null;
+        this._encryptionKey = sessionNonce
+            ? window.LanPairing.deriveSessionKey(secret, sessionNonce)
+            : window.LanPairing.deriveKey(secret);
+        this._keyExchangeDone = true;
+        Events.fire('e2e-encryption-active');
+        const badge = document.getElementById('e2e-badge');
+        if (badge) badge.removeAttribute('hidden');
+
+        // 配对确认握手：双方各自派生密钥后立即发一条 AEAD 加密的 e2e-confirm。
+        // 对端若持不同 S（输错码/被恶意服务器路由进错误房间），解密必失败并
+        // 触发提示，避免在错配状态下默默传文件。认证成功（_onE2e 收到合法
+        // e2e-confirm）即确认密钥一致。
+        //
+        // 同时携带本会话 nonce：对端收到后据此切换到同一个每会话密钥。nonce 本身
+        // 不是秘密（它只是 HKDF 的 salt），泄露它无法派生出 S 或密钥；但它必须
+        // **经过认证**才能避免被中间人替换——所以它在握手包内随 AEAD 一起发出，
+        // 而这条握手包是用旧（S 派生）密钥加密的，替换会导致认证失败。
+        this._sendEncrypted('e2e-confirm', {
+            n: Array.from(crypto.getRandomValues(new Uint8Array(8))),
+            sn: this._sessionNonce,
+            v: LAN_PROTOCOL_VERSION
+        });
+    }
+
+    /**
+     * 采用本会话的 nonce 并切换到每会话密钥（前向保密）。
+     *
+     * 双方必须收敛到**同一个** nonce，否则密钥不一致。约定：**发起方（isCaller）
+     * 的 nonce 为准** —— 这是确定性的，双方各自可算，无需额外协商轮次，也不会
+     * 出现"两边同时换钥导致不一致"的竞态。两个 nonce 都是随机 32 字节，中间人
+     * 无法预测或操纵。
+     *
+     * e2e-confirm 是用「S 派生的密钥」加密的，所以 nonce 的传递经过认证：
+     * 中间人替换 sn 会让后续任何一帧都无法通过 AEAD 校验（双方密钥不再一致），
+     * 不会静默降级；调用方已承诺"解密失败即提示重新配对"。
+     */
+    _adoptSessionNonce(peerNonce) {
+        if (typeof peerNonce !== 'string' || !/^[0-9a-f]{64}$/.test(peerNonce)) {
+            // 对端未携带合法的会话 nonce（理论上不该发生，因为两端协议版本一致）。
+            // 保持当前派生方式，不静默改变密钥。
+            console.warn('E2E: 对端未携带合法的会话 nonce，保持现有会话密钥');
+            return;
+        }
+        // 发起方的 nonce 胜出；加入方采用发起方的。
+        const agreed = this._isCaller ? this._sessionNonce : peerNonce;
+        if (!agreed) return;
+        if (this._sessionNonceApplied === agreed) return;   // 已切换，避免重钥循环
+        const secret = this._getPairSecret();
+        if (!secret) return;
+        this._sessionNonceApplied = agreed;
+        this._sessionNonce = agreed;
+        this._encryptionKey = window.LanPairing.deriveSessionKey(secret, agreed);
+    }
+
+    _encrypt(data) {
+        if (!this._encryptionKey) return data;
+        // ChaCha20-Poly1305 AEAD：加密 + Poly1305 完整性认证（防篡改）。
+        // 流密码本身不含认证，TLS 1.3 同款 AEAD 组合。帧格式：
+        //   nonce(12) ‖ ciphertext ‖ tag(16)
+        // noble-ciphers 的 encrypt() 输出 ct‖tag，前面再拼上随机 nonce。
+        // WebCrypto 的 crypto.subtle 在非 HTTPS 局域网来源不可用，故纯 JS。
+        //
+        // 性能：发送是严格串行的（一次只有一块在途，见 FileChunker），所以这里
+        // 复用一块预分配的帧缓冲，避免每 1MB 再分配一个 12+len 字节的新数组。
+        // 复用安全的前提是「上一帧已被 WebSocket 完整拷贝」：WebSocket.send()
+        // 是同步拷贝语义（浏览器端与 ws 服务端都如此），返回后不再引用该缓冲。
+        // 保守起见仍在尺寸变化时重建，避免残留数据。
+        const nonce = crypto.getRandomValues(new Uint8Array(12));
+        const sealed = window.Chacha.chacha20poly1305(this._encryptionKey, nonce)
+            .encrypt(data instanceof Uint8Array ? data : new Uint8Array(data)); // sealed = ciphertext ‖ tag(16)
+        const total = 12 + sealed.length;
+        if (!this._sendFrameBuffer || this._sendFrameBuffer.byteLength !== total) {
+            this._sendFrameBuffer = new Uint8Array(total);
+        }
+        const result = this._sendFrameBuffer;
+        result.set(nonce);
+        result.set(sealed, 12);
+        return result.buffer;
+    }
+
+    _decrypt(data) {
+        // AEAD 解密并校验 tag。认证失败（篡改/密钥不一致/错配）返回 null，
+        // 调用方丢弃该块。不存在"无密钥时原样放行"的旧路径——新协议下所有
+        // 帧都必须可认证。
+        if (!this._encryptionKey) return null;
+        const view = new Uint8Array(data);
+        if (view.length < 12 + 16) return null;   // 不够一个合法 AEAD 帧
+        // subarray() 而不是 slice()：两者语义相同，但 subarray 是**零拷贝视图**，
+        // slice 会把整个 1MB 密文再复制一份。这是接收热路径上最廉价的优化——
+        // 每 1MB 省掉一次 1MB 分配与拷贝，显著降低 GC 抖动。
+        // 安全性核对：noble 的 rt() 只做 `instanceof Uint8Array` 校验，subarray
+        // 返回的仍是 Uint8Array 视图，完全兼容（不依赖 byteOffset=0）。
+        const nonce = view.subarray(0, 12);
+        const sealed = view.subarray(12);
+        try {
+            return window.Chacha.chacha20poly1305(this._encryptionKey, nonce)
+                .decrypt(sealed).buffer;
+        } catch (e) {
+            console.warn('E2E: AEAD 认证失败（数据被篡改或密钥不一致），丢弃该块', e);
+            Events.fire('notify-user', {
+                message: '⚠️ 密文校验失败，已丢弃。可能密钥不一致或传输被篡改。'
+            });
+            return null;
+        }
+    }
+
+    // ---- Encrypted envelope（元数据 + 配对确认）----------------------------
+    // 敏感 JSON 负载（文件名、大小、聊天文本、offset）在过服务器中继前用会话
+    // AEAD 加密。路由字段（type/to/roomType/roomId）保持明文——服务器必须在不
+    // 解密的前提下路由。接收端 _onE2e 解密后按内层 type 重新分派。
+
+    /** 把一个小 JSON 负载加密成可中继的 {type:'e2e', data:base64} 信封。 */
+    _sendEncrypted(type, payload) {
+        const key = this._requireEncryption();
+        if (!key) return;
+        const inner = { type: type, ...payload };
+        const plaintext = new TextEncoder().encode(JSON.stringify(inner));
+        const nonce = crypto.getRandomValues(new Uint8Array(12));
+        const sealed = window.Chacha.chacha20poly1305(key, nonce).encrypt(plaintext);
+        const frame = new Uint8Array(12 + sealed.length);
+        frame.set(nonce);
+        frame.set(sealed, 12);
+        this.sendJSON({ type: 'e2e', data: arrayBufferToBase64(frame.buffer) });
+    }
+
+    /** 解密收到的 {type:'e2e'} 信封并分派内层消息。 */
+    _onE2e(message) {
+        if (!this._encryptionKey) {
+            console.warn('E2E: received encrypted message but not paired, dropping');
+            return;
+        }
+        let inner;
+        try {
+            const frame = new Uint8Array(base64ToArrayBuffer(message.data));
+            const nonce = frame.slice(0, 12);
+            const sealed = frame.slice(12);
+            const plaintext = window.Chacha.chacha20poly1305(this._encryptionKey, nonce)
+                .decrypt(sealed);
+            inner = JSON.parse(new TextDecoder().decode(plaintext));
+        } catch (e) {
+            // 认证失败 = 密钥不一致或数据被篡改。配对确认握手阶段失败说明对方
+            // 持有不同 S（错配/被恶意服务器路由进错误房间），立即提示。
+            console.warn('E2E: decrypt/verify failed, dropping', e);
+            Events.fire('notify-user', {
+                message: '⚠️ 配对密钥不一致或数据被篡改，已丢弃。请重新配对。'
+            });
+            return;
+        }
+        if (inner.type === 'e2e-confirm') {
+            // 配对确认：对端用相同 S 成功解出我们的确认 —— 密钥一致，进入可传状态。
+            this._e2eConfirmed = true;
+            this._adoptSessionNonce(inner.sn);
+            return;
+        }
+        this._onMessage(JSON.stringify(inner));
+    }
+
+    /**
+     * Make sure the E2E key exists before sending file data. Returns the key,
+     * or null if encryption could not be established (in which case the
+     * transfer is rejected).
+     */
+    _requireEncryption() {
+        if (!this._encryptionKey) this._initEncryption();
+        if (!this._encryptionKey) {
+            console.error('Blocked: peers not paired, transfer rejected');
+            Events.fire('notify-user', { message: '❌ 未配对，已拒绝传输。请先点击顶栏 🔗 配对' });
+            this._busy = false;
+            this._filesQueue = [];
+            return null;
+        }
+        return this._encryptionKey;
+    }
+
+    async requestFileTransfer(files) {
+        let header = [];
+        let totalSize = 0;
+        let imagesOnly = true
+        for (let i=0; i<files.length; i++) {
+            Events.fire('set-progress', {peerId: this._peerId, progress: 0.8*i/files.length, status: 'prepare'})
+            header.push({
+                name: files[i].name,
+                mime: files[i].type,
+                size: files[i].size
+            });
+            totalSize += files[i].size;
+            if (files[i].type.split('/')[0] !== 'image') imagesOnly = false;
+        }
+
+        Events.fire('set-progress', {peerId: this._peerId, progress: 0.8, status: 'prepare'})
+
+        let dataUrl = '';
+        if (files[0].type.split('/')[0] === 'image') {
+            try {
+                dataUrl = await getThumbnailAsDataUrl(files[0], 400, null, 0.9);
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        Events.fire('set-progress', {peerId: this._peerId, progress: 1, status: 'prepare'})
+
+        this._filesRequested = files;
+
+        // 文件名/大小等元数据 E2E 加密过中继：服务器只见密文，看不到"传了什么"。
+        this._sendEncrypted('request', {
+            header: header,
+            totalSize: totalSize,
+            imagesOnly: imagesOnly,
+            thumbnailDataUrl: dataUrl
+        });
+        Events.fire('set-progress', {peerId: this._peerId, progress: 0, status: 'wait'})
+    }
+
+    async sendFiles() {
+        for (let i=0; i<this._filesRequested.length; i++) {
+            this._filesQueue.push(this._filesRequested[i]);
+        }
+        this._filesRequested = null
+        if (this._busy) return;
+        this._dequeueFile();
+    }
+
+    _dequeueFile() {
+        this._busy = true;
+        const file = this._filesQueue.shift();
+        this._sendFile(file);
+    }
+
+    async _sendFile(file) {
+        // 新文件：通知子类丢弃上一文件遗留的二进制帧授权计数（WSPeer 覆写为
+        // 重置 _chunkGrantLeft）。否则上一文件用剩的授权会被误算到本文件头上，
+        // 本文件第一批块不再发送 prep，服务端没有路由就把帧丢弃（文件静默损坏）。
+        this._onNewSendFile();
+        // 文件名/大小/mime 加密过中继。
+        this._sendEncrypted('header', {
+            size: file.size,
+            name: file.name,
+            mime: file.type
+        });
+        this._chunker = new FileChunker(file,
+            chunk => this._send(chunk),
+            offset => this._onPartitionEnd(offset));
+        this._chunker.nextPartition();
+    }
+
+    /** Hook for transports that carry per-file framing state (see WSPeer). */
+    _onNewSendFile() {
+    }
+
+    _onPartitionEnd(offset) {
+        this._sendEncrypted('partition', { offset: offset });
+    }
+
+    _onReceivedPartitionEnd(offset) {
+        this._sendEncrypted('partition-received', { offset: offset });
+    }
+
+    _sendNextPartition() {
+        if (!this._chunker || this._chunker.isFileEnd()) return;
+        this._chunker.nextPartition();
+    }
+
+    _sendProgress(progress) {
+        this.sendJSON({ type: 'progress', progress: progress });
+    }
+
+    _onMessage(message) {
+        if (typeof message !== 'string') {
+            this._onChunkReceived(message);
+            return;
+        }
+        const messageJSON = JSON.parse(message);
+        switch (messageJSON.type) {
+            case 'e2e':
+                // 加密信封：解密内层并重新分派（元数据 / 配对确认握手）。
+                this._onE2e(messageJSON);
+                break;
+            case 'request':
+                this._onFilesTransferRequest(messageJSON);
+                break;
+            case 'header':
+                this._onFileHeader(messageJSON);
+                break;
+            case 'partition':
+                this._onReceivedPartitionEnd(messageJSON);
+                break;
+            case 'partition-received':
+                this._sendNextPartition();
+                break;
+            case 'progress':
+                this._onDownloadProgress(messageJSON.progress);
+                break;
+            case 'files-transfer-response':
+                this._onFileTransferRequestResponded(messageJSON);
+                break;
+            case 'file-transfer-complete':
+                this._onFileTransferCompleted();
+                break;
+            case 'message-transfer-complete':
+                this._onMessageTransferCompleted();
+                break;
+            case 'text':
+                this._onTextReceived(messageJSON);
+                break;
+            case 'display-name-changed':
+                this._onDisplayNameChanged(messageJSON);
+                break;
+        }
+    }
+
+    _onFilesTransferRequest(request) {
+        if (this._requestPending) {
+            // Only accept one request at a time per peer
+            this.sendJSON({type: 'files-transfer-response', accepted: false});
+            return;
+        }
+        if (window.iOS && request.totalSize >= 200*1024*1024) {
+            // iOS Safari can only put 400MB at once to memory.
+            // Request to send them in chunks of 200MB instead:
+            this.sendJSON({type: 'files-transfer-response', accepted: false, reason: 'ios-memory-limit'});
+            return;
+        }
+
+        this._requestPending = request;
+
+        if (this._autoAccept) {
+            // auto accept if set via Edit Paired Devices Dialog
+            this._respondToFileTransferRequest(true);
+            return;
+        }
+
+        // default behavior: show user transfer request
+        Events.fire('files-transfer-request', {
+            request: request,
+            peerId: this._peerId
+        });
+    }
+
+    _respondToFileTransferRequest(accepted) {
+        this.sendJSON({type: 'files-transfer-response', accepted: accepted});
+        if (accepted) {
+            this._requestAccepted = this._requestPending;
+            this._totalBytesReceived = 0;
+            this._busy = true;
+            this._filesReceived = [];
+        }
+        this._requestPending = null;
+    }
+
+    _onFileHeader(header) {
+        if (this._requestAccepted && this._requestAccepted.header.length) {
+            this._lastProgress = 0;
+            // Android App 走本地流式写盘：边收边写，内存占用与文件大小无关。
+            // 桌面浏览器没有本地写盘服务，退回整文件 Blob（桌面内存充裕，且
+            // a.download 原生下载本身就是流式的）。
+            let sink = null;
+            if (StreamingFileSink.isAvailable()) {
+                sink = new StreamingFileSink(header.name, header.mime, header.size);
+                sink.start().catch(e => {
+                    // 本地写盘服务不可用（端口被占、服务未起等）：退回 Blob 路径，
+                    // 宁可内存占用高，也不要让传输整个失败。
+                    console.warn('流式写盘不可用，退回内存 Blob 路径', e);
+                    this._digester = this._makeDigester(header, null);
+                });
+            }
+            this._digester = this._makeDigester(header, sink);
+        }
+    }
+
+    _makeDigester(header, sink) {
+        return new FileDigester({size: header.size, name: header.name, mime: header.mime},
+            this._requestAccepted.totalSize,
+            this._totalBytesReceived,
+            fileBlob => this._onFileReceived(fileBlob),
+            sink
+        );
+    }
+
+    _abortTransfer() {
+        Events.fire('set-progress', {peerId: this._peerId, progress: 1, status: 'wait'});
+        Events.fire('notify-user', Localization.getTranslation("notifications.files-incorrect"));
+        this._filesReceived = [];
+        this._requestAccepted = null;
+        this._digester = null;
+        throw new Error("Received files differ from requested files. Abort!");
+    }
+
+    _onChunkReceived(chunk) {
+        if(!this._digester || !(chunk.byteLength || chunk.size)) return;
+
+        this._digester.unchunk(chunk);
+        const progress = this._digester.progress;
+
+        if (progress > 1) {
+            this._abortTransfer();
+        }
+
+        this._onDownloadProgress(progress);
+
+        // occasionally notify sender about our progress
+        if (progress - this._lastProgress < 0.005 && progress !== 1) return;
+        this._lastProgress = progress;
+        this._sendProgress(progress);
+    }
+
+    _onDownloadProgress(progress) {
+        Events.fire('set-progress', {peerId: this._peerId, progress: progress, status: 'transfer'});
+    }
+
+    async _onFileReceived(fileBlob) {
+        const acceptedHeader = this._requestAccepted.header.shift();
+        this._totalBytesReceived += fileBlob.size;
+
+        this.sendJSON({type: 'file-transfer-complete'});
+
+        const sameSize = fileBlob.size === acceptedHeader.size;
+        const sameName = fileBlob.name === acceptedHeader.name
+        if (!sameSize || !sameName) {
+            this._abortTransfer();
+        }
+
+        // include for compatibility with Android app
+        Events.fire('file-received', fileBlob);
+
+        // 流式写盘的文件已经在「下载」目录里落盘了，不需要（也绝不能）再进
+        // 批量下载流程——否则 UI 会通过 a[download] 再存一次，出现重复文件。
+        // 因此只把回退路径（内存 Blob）的文件收进待下载批次。
+        if (!fileBlob._alreadySaved) {
+            this._filesReceived.push(fileBlob);
+        }
+        if (!this._requestAccepted.header.length) {
+            this._busy = false;
+            Events.fire('set-progress', {peerId: this._peerId, progress: 0, status: 'process'});
+            if (this._filesReceived.length) {
+                Events.fire('files-received', {peerId: this._peerId, files: this._filesReceived, imagesOnly: this._requestAccepted.imagesOnly, totalSize: this._requestAccepted.totalSize});
+            }
+            else if (fileBlob._alreadySaved) {
+                // 全部文件都由流式路径直接落盘：告知 UI 传输完成即可。
+                Events.fire('files-saved-directly', {
+                    peerId: this._peerId,
+                    imagesOnly: this._requestAccepted.imagesOnly,
+                    totalSize: this._requestAccepted.totalSize
+                });
+            }
+            this._filesReceived = [];
+            this._requestAccepted = null;
+        }
+    }
+
+    _onFileTransferCompleted() {
+        this._chunker = null;
+        if (!this._filesQueue.length) {
+            this._busy = false;
+            Events.fire('notify-user', Localization.getTranslation("notifications.file-transfer-completed"));
+            Events.fire('files-sent'); // used by Android app
+        }
+        else {
+            this._dequeueFile();
+        }
+    }
+
+    _onFileTransferRequestResponded(message) {
+        if (!message.accepted) {
+            Events.fire('set-progress', {peerId: this._peerId, progress: 1, status: 'wait'});
+            this._filesRequested = null;
+            if (message.reason === 'ios-memory-limit') {
+                Events.fire('notify-user', Localization.getTranslation("notifications.ios-memory-limit"));
+            }
+            return;
+        }
+        Events.fire('file-transfer-accepted');
+        Events.fire('set-progress', {peerId: this._peerId, progress: 0, status: 'transfer'});
+        this.sendFiles();
+    }
+
+    _onMessageTransferCompleted() {
+        Events.fire('notify-user', Localization.getTranslation("notifications.message-transfer-completed"));
+    }
+
+    sendText(text) {
+        const unescaped = btoa(unescape(encodeURIComponent(text)));
+        // 聊天文本也 E2E 加密过中继，服务器看不到内容。
+        this._sendEncrypted('text', { text: unescaped });
+    }
+
+    _onTextReceived(message) {
+        if (!message.text) return;
+        const escaped = decodeURIComponent(escape(atob(message.text)));
+        Events.fire('text-received', { text: escaped, peerId: this._peerId });
+        this.sendJSON({ type: 'message-transfer-complete' });
+    }
+
+    _onDisplayNameChanged(message) {
+        const displayNameHasChanged = this._displayName !== message.displayName
+
+        if (message.displayName && displayNameHasChanged) {
+            this._displayName = message.displayName;
+        }
+
+        Events.fire('peer-display-name-changed', {peerId: this._peerId, displayName: message.displayName});
+
+        if (!displayNameHasChanged) return;
+        Events.fire('notify-peer-display-name-changed', this._peerId);
+    }
+}
+
+class RTCPeer extends Peer {
+
+    constructor(serverConnection, isCaller, peerId, roomType, roomId, rtcConfig, peerLanIp) {
+        super(serverConnection, isCaller, peerId, roomType, roomId);
+
+        this.rtcSupported = true;
+        this.rtcConfig = rtcConfig
+        this._peerLanIp = peerLanIp
+
+        if (!this._isCaller) return; // we will listen for a caller
+        this._connect();
+    }
+
+    _connect() {
+        if (!this._conn || this._conn.signalingState === "closed") this._openConnection();
+
+        if (this._isCaller) {
+            this._openChannel();
+        }
+        else {
+            this._conn.ondatachannel = e => this._onChannelOpened(e);
+        }
+    }
+
+    _openConnection() {
+        this._conn = new RTCPeerConnection(this.rtcConfig);
+        this._conn.onicecandidate = e => this._onIceCandidate(e);
+        this._conn.onicecandidateerror = e => this._onError(e);
+        this._conn.onconnectionstatechange = _ => this._onConnectionStateChange();
+        this._conn.oniceconnectionstatechange = e => this._onIceConnectionStateChange(e);
+    }
+
+    _openChannel() {
+        if (!this._conn) return;
+
+        const channel = this._conn.createDataChannel('data-channel', {
+            ordered: true,
+            reliable: true // Obsolete. See https://developer.mozilla.org/en-US/docs/Web/API/RTCDataChannel/reliable
+        });
+        channel.onopen = e => this._onChannelOpened(e);
+        channel.onerror = e => this._onError(e);
+
+        this._conn
+            .createOffer()
+            .then(d => this._onDescription(d))
+            .catch(e => this._onError(e));
+    }
+
+    _onDescription(description) {
+        // description.sdp = description.sdp.replace('b=AS:30', 'b=AS:1638400');
+        this._conn
+            .setLocalDescription(description)
+            .then(_ => this._sendSignal({ sdp: description }))
+            .catch(e => this._onError(e));
+    }
+
+    _onIceCandidate(event) {
+        if (!event.candidate) return;
+        this._sendSignal({ ice: event.candidate });
+    }
+
+    onServerMessage(message) {
+        if (!this._conn) this._connect();
+
+        if (message.sdp) {
+            this._conn
+                .setRemoteDescription(message.sdp)
+                .then(_ => {
+                    if (message.sdp.type === 'offer') {
+                        return this._conn
+                            .createAnswer()
+                            .then(d => this._onDescription(d));
+                    }
+                })
+                .catch(e => this._onError(e));
+        }
+        else if (message.ice) {
+            this._conn
+                .addIceCandidate(new RTCIceCandidate(message.ice))
+                .catch(e => this._onError(e));
+        }
+    }
+
+    _onChannelOpened(event) {
+        console.log('RTC: channel opened with', this._peerId);
+        const channel = event.channel || event.target;
+        channel.binaryType = 'arraybuffer';
+        channel.onmessage = e => this._onMessage(e.data);
+        channel.onclose = _ => this._onChannelClosed();
+        this._channel = channel;
+        Events.on('beforeunload', e => this._onBeforeUnload(e));
+        Events.on('pagehide', _ => this._onPageHide());
+        Events.fire('peer-connected', {peerId: this._peerId, connectionHash: this.getConnectionHash()});
+    }
+
+    _onMessage(message) {
+        if (typeof message !== 'string') {
+            // File data chunk: must be end-to-end encrypted
+            if (!this._encryptionKey) {
+                console.warn('Blocked: received file chunk but peers not paired, dropping');
+                return;
+            }
+            message = this._decrypt(message);
+            if (message === null) return;   // AEAD 认证失败，丢弃
+            super._onMessage(message);
+            return;
+        }
+        console.log('RTC:', JSON.parse(message));
+        super._onMessage(message);
+    }
+
+    getConnectionHash() {
+        const localDescriptionLines = this._conn.localDescription.sdp.split("\r\n");
+        const remoteDescriptionLines = this._conn.remoteDescription.sdp.split("\r\n");
+        let localConnectionFingerprint, remoteConnectionFingerprint;
+        for (let i=0; i<localDescriptionLines.length; i++) {
+            if (localDescriptionLines[i].startsWith("a=fingerprint:")) {
+                localConnectionFingerprint = localDescriptionLines[i].substring(14);
+                break;
+            }
+        }
+        for (let i=0; i<remoteDescriptionLines.length; i++) {
+            if (remoteDescriptionLines[i].startsWith("a=fingerprint:")) {
+                remoteConnectionFingerprint = remoteDescriptionLines[i].substring(14);
+                break;
+            }
+        }
+        const combinedFingerprints = this._isCaller
+            ? localConnectionFingerprint + remoteConnectionFingerprint
+            : remoteConnectionFingerprint + localConnectionFingerprint;
+        let hash = cyrb53(combinedFingerprints).toString();
+        while (hash.length < 16) {
+            hash = "0" + hash;
+        }
+        return hash;
+    }
+
+    _onBeforeUnload(e) {
+        if (this._busy) {
+            e.preventDefault();
+            return Localization.getTranslation("notifications.unfinished-transfers-warning");
+        }
+    }
+
+    _onPageHide() {
+        this._disconnect();
+    }
+
+    _disconnect() {
+        if (this._conn && this._channel) {
+            this._channel.onclose = null;
+            this._channel.close();
+        }
+        Events.fire('peer-disconnected', this._peerId);
+    }
+
+    _onChannelClosed() {
+        console.log('RTC: channel closed', this._peerId);
+        Events.fire('peer-disconnected', this._peerId);
+        if (!this._isCaller) return;
+        this._connect(); // reopen the channel
+    }
+
+    _onConnectionStateChange() {
+        console.log('RTC: state changed:', this._conn.connectionState);
+        switch (this._conn.connectionState) {
+            case 'disconnected':
+                Events.fire('peer-disconnected', this._peerId);
+                this._onError('rtc connection disconnected');
+                break;
+            case 'failed':
+                Events.fire('peer-disconnected', this._peerId);
+                this._onError('rtc connection failed');
+                break;
+        }
+    }
+
+    _onIceConnectionStateChange() {
+        switch (this._conn.iceConnectionState) {
+            case 'failed':
+                this._onError('ICE Gathering failed');
+                break;
+            default:
+                console.log('ICE Gathering', this._conn.iceConnectionState);
+        }
+    }
+
+    _onError(error) {
+        console.error(error);
+    }
+
+    _send(message) {
+        if (!this._channel) this.refresh();
+        if (message instanceof ArrayBuffer) {
+            // File data chunk: require E2E and encrypt before sending
+            if (!this._requireEncryption()) return;
+            message = this._encrypt(message);
+        }
+        this._channel.send(message);
+    }
+
+    _sendSignal(signal) {
+        signal.type = 'signal';
+        signal.to = this._peerId;
+        signal.roomType = this._getRoomTypes()[0];
+        signal.roomId = this._roomIds[this._getRoomTypes()[0]];
+        this._server.send(signal);
+    }
+
+    refresh() {
+        // check if channel is open. otherwise create one
+        if (this._isConnected() || this._isConnecting()) return;
+
+        // only reconnect if peer is caller
+        if (!this._isCaller) return;
+
+        this._connect();
+    }
+
+    _isConnected() {
+        return this._channel && this._channel.readyState === 'open';
+    }
+
+    _isConnecting() {
+        return this._channel && this._channel.readyState === 'connecting';
+    }
+
+    sendDisplayName(displayName) {
+        if (!this._isConnected()) return;
+        super.sendDisplayName(displayName);
+    }
+}
+
+class WSPeer extends Peer {
+
+    // How many further binary chunks the outstanding ws-chunk-prep grant still
+    // covers. See _send / _sendChunkGrant.
+    _chunkGrantLeft = 0;
+
+    /** A new file starts: the previous file's remaining grant must not carry over. */
+    _onNewSendFile() {
+        this._chunkGrantLeft = 0;
+    }
+
+    constructor(serverConnection, isCaller, peerId, roomType, roomId) {
+        super(serverConnection, isCaller, peerId, roomType, roomId);
+
+        this.rtcSupported = false;
+
+        if (!this._isCaller) return;
+        this._sendSignal();
+    }
+
+    _sendSignal(connected = false) {
+        this.sendJSON({ type: 'signal', connected });
+    }
+
+    onServerMessage(message) {
+        this._peerId = message.sender.id;
+        Events.fire('peer-connected', {
+            peerId: message.sender.id,
+            connectionHash: this.getConnectionHash()
+        });
+        if (message.connected) return;
+        this._sendSignal(true);
+    }
+
+    _send(chunk) {
+        if (!this._requireEncryption()) return;
+        chunk = this._encrypt(chunk);
+        // Send the encrypted bytes as a raw BINARY WebSocket frame instead of
+        // base64-in-JSON. This removes the 33% base64 overhead AND the
+        // JS atob/btoa cost that capped transfers at ~5 MB/s.
+        //
+        // ROUTING: binary frames carry no routing info, so the server must be
+        // told the recipient first. Originally that prep was sent before EVERY
+        // 1 MB chunk (3 WebSocket frames per chunk: prep + binary + relayed
+        // prep). The grant is now issued once per partition — `_chunkGrantLeft`
+        // counts how many chunks the outstanding grant still covers — which cuts
+        // the per-chunk framing overhead to a single frame.
+        if (this._chunkGrantLeft <= 0) {
+            this._sendChunkGrant();
+        }
+        this._chunkGrantLeft--;
+        this._server.sendBinary(chunk);
+    }
+
+    /** Announce the route for the next partition's worth of binary chunks. */
+    _sendChunkGrant() {
+        // One grant per partition. Must match FileChunker's partition size
+        // (see _maxPartitionSize below) and stay within the server's clamp
+        // (ws-server MAX_CHUNK_GRANT), otherwise frames would be dropped.
+        const chunkSize = 1048576;              // FileChunker._chunkSize
+        const maxPartitionSize = 10e6;          // FileChunker._maxPartitionSize
+        const perPartition = Math.min(
+            Math.ceil(maxPartitionSize / chunkSize), 64);
+        this._chunkGrantLeft = perPartition;
+        this.sendJSON({ type: 'ws-chunk-prep', to: this._peerId, count: perPartition });
+    }
+
+    sendJSON(message) {
+        message.to = this._peerId;
+        message.roomType = this._getRoomTypes()[0];
+        message.roomId = this._roomIds[this._getRoomTypes()[0]];
+        this._server.send(message);
+    }
+
+    getConnectionHash() {
+        return "";
+    }
+}
+
+class PeersManager {
+
+    constructor(serverConnection) {
+        this.peers = {};
+        this._server = serverConnection;
+        Events.on('signal', e => this._onMessage(e.detail));
+        Events.on('ws-binary', e => this._onWsBinary(e.detail));
+        Events.on('peers', e => this._onPeers(e.detail));
+        Events.on('files-selected', e => this._onFilesSelected(e.detail));
+        Events.on('respond-to-files-transfer-request', e => this._onRespondToFileTransferRequest(e.detail))
+        Events.on('send-text', e => this._onSendText(e.detail));
+        Events.on('peer-left', e => this._onPeerLeft(e.detail));
+        Events.on('peer-joined', e => this._onPeerJoined(e.detail));
+        Events.on('peer-connected', e => this._onPeerConnected(e.detail.peerId));
+        Events.on('peer-disconnected', e => this._onPeerDisconnected(e.detail));
+
+        // this device closes connection
+        Events.on('room-secrets-deleted', e => this._onRoomSecretsDeleted(e.detail));
+        Events.on('leave-public-room', e => this._onLeavePublicRoom(e.detail));
+
+        // peer closes connection
+        Events.on('secret-room-deleted', e => this._onSecretRoomDeleted(e.detail));
+
+        Events.on('display-name', e => this._onDisplayName(e.detail.displayName));
+        Events.on('self-display-name-changed', e => this._notifyPeersDisplayNameChanged(e.detail));
+        Events.on('notify-peer-display-name-changed', e => this._notifyPeerDisplayNameChanged(e.detail));
+        Events.on('auto-accept-updated', e => this._onAutoAcceptUpdated(e.detail.roomSecret, e.detail.autoAccept));
+        Events.on('ws-disconnected', _ => this._onWsDisconnected());
+        Events.on('ws-relay', e => this._onWsRelay(e.detail));
+        Events.on('ws-config', e => this._onWsConfig(e.detail));
+    }
+
+    _onWsConfig(wsConfig) {
+        this._wsConfig = wsConfig;
+    }
+
+    _onMessage(message) {
+        const peerId = message.sender.id;
+        this.peers[peerId].onServerMessage(message);
+    }
+
+    _refreshPeer(peerId, roomType, roomId) {
+        if (!this._peerExists(peerId)) return false;
+
+        const peer = this.peers[peerId];
+        const roomTypesDiffer = Object.keys(peer._roomIds)[0] !== roomType;
+        const roomIdsDiffer = peer._roomIds[roomType] !== roomId;
+
+        // if roomType or roomId for roomType differs peer is already connected
+        // -> only update roomSecret and reevaluate auto accept
+        if (roomTypesDiffer || roomIdsDiffer) {
+            peer._updateRoomIds(roomType, roomId);
+            peer._evaluateAutoAccept();
+
+            return true;
+        }
+
+        peer.refresh();
+
+        return true;
+    }
+
+    _createOrRefreshPeer(isCaller, peerId, roomType, roomId, rtcSupported, peerLanIp) {
+        if (this._peerExists(peerId)) {
+            this._refreshPeer(peerId, roomType, roomId);
+            return;
+        }
+
+        if (this._wsConfig.wsFallback) {
+            // Use WebSocket relay (data goes through server, stays on LAN)
+            this.peers[peerId] = new WSPeer(this._server, isCaller, peerId, roomType, roomId);
+        }
+        else if (window.isRtcSupported && rtcSupported) {
+            this.peers[peerId] = new RTCPeer(this._server, isCaller, peerId, roomType, roomId, this._wsConfig.rtcConfig, peerLanIp);
+        }
+        else {
+            console.warn("Websocket fallback is not activated on this instance.\n" +
+                "Activate WebRTC in this browser or ask the admin of this instance to activate the websocket fallback.")
+        }
+    }
+
+    _onPeerJoined(message) {
+        this._createOrRefreshPeer(false, message.peer.id, message.roomType, message.roomId, message.peer.rtcSupported, message.peer.lanIp);
+    }
+
+    _onPeers(message) {
+        message.peers.forEach(peer => {
+            this._createOrRefreshPeer(true, peer.id, message.roomType, message.roomId, peer.rtcSupported, peer.lanIp);
+        })
+    }
+
+    _onWsRelay(message) {
+        if (!this._wsConfig.wsFallback) return;
+
+        const messageJSON = JSON.parse(message);
+        const peer = this.peers[messageJSON.sender.id];
+        if (!peer) return;
+
+        if (messageJSON.type === 'ws-chunk') {
+            // Legacy text relay (still supported, but the app now sends binary)
+            if (!peer._encryptionKey) {
+                console.warn('Blocked: received ws-chunk but peers not paired, dropping');
+                return;
+            }
+            let data = base64ToArrayBuffer(messageJSON.chunk);
+            if (peer._encryptionKey) {
+                data = peer._decrypt(data);
+            }
+            if (data === null) return;   // AEAD 认证失败，丢弃
+            peer._onMessage(data);
+        } else {
+            peer._onMessage(message);
+        }
+    }
+
+    /** A raw binary file chunk arrived over the WebSocket (fast path). */
+    _onWsBinary({from, data}) {
+        const peer = this.peers[from];
+        if (!peer) return;
+        if (!peer._encryptionKey) {
+            console.warn('Blocked: received binary chunk but peers not paired, dropping');
+            return;
+        }
+        const decrypted = peer._decrypt(data);
+        if (decrypted === null) return;   // AEAD 认证失败，丢弃
+        peer._onMessage(decrypted);
+    }
+
+    _onRespondToFileTransferRequest(detail) {
+        this.peers[detail.to]._respondToFileTransferRequest(detail.accepted);
+    }
+
+    async _onFilesSelected(message) {
+        let files = mime.addMissingMimeTypesToFiles([...message.files]);
+        await this.peers[message.to].requestFileTransfer(files);
+    }
+
+    _onSendText(message) {
+        this.peers[message.to].sendText(message.text);
+    }
+
+    _onPeerLeft(message) {
+        if (this._peerExists(message.peerId) && this._webRtcSupported(message.peerId)) {
+            console.log('WSPeer left:', message.peerId);
+        }
+        if (message.disconnect === true) {
+            // if user actively disconnected from lan-projects server, disconnect all peer to peer connections immediately
+            this._disconnectOrRemoveRoomTypeByPeerId(message.peerId, message.roomType);
+
+            // If no peers are connected anymore, we can safely assume that no other tab on the same browser is connected:
+            // Tidy up peerIds in localStorage
+            if (Object.keys(this.peers).length === 0) {
+                BrowserTabsConnector
+                    .removeOtherPeerIdsFromLocalStorage()
+                    .then(peerIds => {
+                        if (!peerIds) return;
+                        console.log("successfully removed other peerIds from localStorage");
+                    });
+            }
+        }
+    }
+
+    _onPeerConnected(peerId) {
+        this._notifyPeerDisplayNameChanged(peerId);
+        // Show E2E encryption badge if encryption is established on this peer
+        const peer = this.peers[peerId];
+        if (peer && peer._keyExchangeDone) {
+            Events.fire('e2e-encryption-active');
+        }
+    }
+
+    _peerExists(peerId) {
+        return !!this.peers[peerId];
+    }
+
+    _webRtcSupported(peerId) {
+        return this.peers[peerId].rtcSupported
+    }
+
+    _onWsDisconnected() {
+        if (!this._wsConfig || !this._wsConfig.wsFallback) return;
+
+        for (const peerId in this.peers) {
+            if (!this._webRtcSupported(peerId)) {
+                Events.fire('peer-disconnected', peerId);
+            }
+        }
+    }
+
+    _onPeerDisconnected(peerId) {
+        const peer = this.peers[peerId];
+        delete this.peers[peerId];
+        if (!peer || !peer._conn) return;
+        if (peer._channel) peer._channel.onclose = null;
+        peer._conn.close();
+        peer._busy = false;
+        peer._roomIds = {};
+    }
+
+    _onRoomSecretsDeleted(roomSecrets) {
+        for (let i=0; i<roomSecrets.length; i++) {
+            this._disconnectOrRemoveRoomTypeByRoomId('secret', roomSecrets[i]);
+        }
+    }
+
+    _onLeavePublicRoom(publicRoomId) {
+        this._disconnectOrRemoveRoomTypeByRoomId('public-id', publicRoomId);
+    }
+
+    _onSecretRoomDeleted(roomSecret) {
+        this._disconnectOrRemoveRoomTypeByRoomId('secret', roomSecret);
+    }
+
+    _disconnectOrRemoveRoomTypeByRoomId(roomType, roomId) {
+        const peerIds = this._getPeerIdsFromRoomId(roomId);
+
+        if (!peerIds.length) return;
+
+        for (let i=0; i<peerIds.length; i++) {
+            this._disconnectOrRemoveRoomTypeByPeerId(peerIds[i], roomType);
+        }
+    }
+
+    _disconnectOrRemoveRoomTypeByPeerId(peerId, roomType) {
+        const peer = this.peers[peerId];
+
+        if (!peer) return;
+
+        if (peer._getRoomTypes().length > 1) {
+            peer._removeRoomType(roomType);
+        }
+        else {
+            Events.fire('peer-disconnected', peerId);
+        }
+    }
+
+    _notifyPeersDisplayNameChanged(newDisplayName) {
+        this._displayName = newDisplayName ? newDisplayName : this._originalDisplayName;
+        for (const peerId in this.peers) {
+            this._notifyPeerDisplayNameChanged(peerId);
+        }
+    }
+
+    _notifyPeerDisplayNameChanged(peerId) {
+        const peer = this.peers[peerId];
+        if (!peer) return;
+        this.peers[peerId].sendDisplayName(this._displayName);
+    }
+
+    _onDisplayName(displayName) {
+        this._originalDisplayName = displayName;
+        // if the displayName has not been changed (yet) set the displayName to the original displayName
+        if (!this._displayName) this._displayName = displayName;
+    }
+
+    _onAutoAcceptUpdated(roomSecret, autoAccept) {
+        const peerId = this._getPeerIdsFromRoomId(roomSecret)[0];
+
+        if (!peerId) return;
+
+        this.peers[peerId]._setAutoAccept(autoAccept);
+    }
+
+    _getPeerIdsFromRoomId(roomId) {
+        if (!roomId) return [];
+
+        let peerIds = []
+        for (const peerId in this.peers) {
+            const peer = this.peers[peerId];
+
+            // peer must have same roomId.
+            if (Object.values(peer._roomIds).includes(roomId)) {
+                peerIds.push(peer._peerId);
+            }
+        }
+        return peerIds;
+    }
+}
+
+class FileChunker {
+
+    constructor(file, onChunk, onPartitionEnd) {
+        // 1 MB chunks, sent as raw binary WebSocket frames (no base64).
+        // Measured: larger chunks (4 MB) were SLOWER on real devices (bigger
+        // buffers / bursty frames hurt more than per-chunk overhead saves), so
+        // 1 MB stays the sweet spot.
+        this._chunkSize = 1048576; // 1 MB
+        this._maxPartitionSize = 10e6; // 10 MB - fewer control messages
+        this._offset = 0;
+        this._partitionSize = 0;
+        this._file = file;
+        this._onChunk = onChunk;
+        this._onPartitionEnd = onPartitionEnd;
+        this._reader = new FileReader();
+        this._reader.addEventListener('load', e => this._onChunkRead(e.target.result));
+    }
+
+    nextPartition() {
+        this._partitionSize = 0;
+        this._readChunk();
+    }
+
+    _readChunk() {
+        const chunk = this._file.slice(this._offset, this._offset + this._chunkSize);
+        this._reader.readAsArrayBuffer(chunk);
+    }
+
+    _onChunkRead(chunk) {
+        this._offset += chunk.byteLength;
+        this._partitionSize += chunk.byteLength;
+        this._onChunk(chunk);
+        if (this.isFileEnd()) return;
+        if (this._isPartitionEnd()) {
+            this._onPartitionEnd(this._offset);
+            return;
+        }
+        this._readChunk();
+    }
+
+    repeatPartition() {
+        this._offset -= this._partitionSize;
+        this.nextPartition();
+    }
+
+    _isPartitionEnd() {
+        return this._partitionSize >= this._maxPartitionSize;
+    }
+
+    isFileEnd() {
+        return this._offset >= this._file.size;
+    }
+}
+
+/**
+ * 接收文件的组装器。
+ *
+ * 旧实现在内存里把整个文件攒成 Blob 才交盘：
+ *     this._buffer.push(chunk)  … 收满整个文件…  new Blob(this._buffer)
+ * 一个 1GB 文件峰值约 2×文件大小（源块数组 + Blob 拷贝），在没有 largeHeap 的
+ * Android WebView 上必然 OOM——主进程被杀，用户看到的就是「传大文件时 App
+ * 自己重启」。
+ *
+ * 现在改为**边收边写**：每块一到达就交给 sink（Android 走本地 3900 流式写盘，
+ * 桌面浏览器走内存 Blob），内存占用与文件大小无关，只与单块（1MB）有关。
+ *
+ * 向后兼容：没有可用 sink 时（例如旧版 App 或纯浏览器）自动退回整文件 Blob，
+ * 行为与旧版一致，只是内存占用高。
+ */
+class FileDigester {
+
+    constructor(meta, totalSize, totalBytesReceived, callback, sink) {
+        this._buffer = [];          // 仅在没有 sink 时使用（回退路径）
+        this._bytesReceived = 0;
+        this._size = meta.size;
+        this._name = meta.name;
+        this._mime = meta.mime;
+        this._totalSize = totalSize;
+        this._totalBytesReceived = totalBytesReceived;
+        this._callback = callback;
+        this._sink = sink || null;
+        this.progress = 0;
+        // 流式写入是异步的（fetch 到本地写盘服务），必须记录失败以免把残文件
+        // 当成功交付。一旦写入出错就停止接收后续块并报错。
+        this._failed = false;
+    }
+
+    unchunk(chunk) {
+        if (this._failed) return;
+        const len = chunk.byteLength || chunk.size || 0;
+        this._bytesReceived += len;
+        this.progress = (this._totalBytesReceived + this._bytesReceived) / this._totalSize;
+        if (isNaN(this.progress)) this.progress = 1
+
+        if (this._sink) {
+            // 流式路径：立刻交给 sink 落盘，不在内存里留存。
+            this._sink.write(chunk).catch(e => {
+                this._failed = true;
+                console.error('FileDigester: 流式写入失败', e);
+                Events.fire('notify-user', {
+                    message: '⚠️ 写入文件失败，传输已中断：' + (e && e.message ? e.message : e)
+                });
+                this._abort();
+            });
+        }
+        else {
+            // 回退路径：旧行为（整文件内存拼接）。
+            this._buffer.push(chunk);
+        }
+
+        if (this._bytesReceived < this._size) return;
+        // 收完：流式路径收尾，回退路径拼 Blob 后交盘。
+        this._finish();
+    }
+
+    _finish() {
+        if (this._failed) return;
+        if (this._sink) {
+            this._sink.finish()
+                .then(() => this._deliver(null))
+                .catch(e => {
+                    this._failed = true;
+                    console.error('FileDigester: 收尾失败', e);
+                    Events.fire('notify-user', {
+                        message: '⚠️ 保存文件失败：' + (e && e.message ? e.message : e)
+                    });
+                    this._abort();
+                });
+            return;
+        }
+        const blob = new Blob(this._buffer);
+        this._buffer = null;
+        this._deliver(blob);
+    }
+
+    /**
+     * 交付文件。流式路径下文件已经在盘上，这里只交付一个「句柄式」的占位 File
+     * （带正确的 name/size）供上层的名称/大小校验与 UI 展示使用，绝不装载内容。
+     */
+    _deliver(blob) {
+        if (blob) {
+            this._callback(new File([blob], this._name, {
+                type: this._mime || "application/octet-stream",
+                lastModified: new Date().getTime()
+            }));
+            return;
+        }
+        this._callback({
+            name: this._name,
+            size: this._size,
+            type: this._mime || "application/octet-stream",
+            _alreadySaved: true
+        });
+    }
+
+    _abort() {
+        this._buffer = null;
+        if (this._sink && this._sink.abort) {
+            try { this._sink.abort(); } catch (e) { /* best effort */ }
+        }
+        Events.fire('set-progress', { progress: 1, status: 'wait' });
+    }
+}
+
+/**
+ * Android 流式写盘 sink：把接收到的每个块 POST 给 App 内的本地保存服务
+ * （127.0.0.1:3900），由原生按 64KB 缓冲直写磁盘。
+ *
+ * 之所以能在 WebView 里直接 fetch：SaveFileServer 已经对 /begin /write /finish
+ * 三个端点做了 Origin 校验（只接受局域网 lan-projects 页面），并且我们在页面
+ * 内发起，Origin 自然是本机服务器地址。
+ *
+ * 桌面浏览器没有这个服务，isAvailable() 会返回 false，从而退回 Blob 路径。
+ */
+class StreamingFileSink {
+
+    static get BASE() { return 'http://127.0.0.1:3900'; }
+
+    /** 只有在 Android App 的 WebView 里才可用（有 JS 桥即代表在 App 内）。 */
+    static isAvailable() {
+        return typeof window !== 'undefined' && !!window.LanProjectsBridge;
+    }
+
+    constructor(name, mime, size) {
+        this._name = name;
+        this._mime = mime || 'application/octet-stream';
+        this._size = size;
+        this._id = null;
+        this._queue = Promise.resolve();
+    }
+
+    /** 开启一个写入会话；返回 this 以便链式使用。 */
+    start() {
+        const url = StreamingFileSink.BASE + '/begin?name=' + encodeURIComponent(this._name)
+            + '&mime=' + encodeURIComponent(this._mime)
+            + '&size=' + this._size;
+        this._queue = fetch(url, { method: 'POST' })
+            .then(r => {
+                if (!r.ok) throw new Error('begin 失败: ' + r.status);
+                return r.text();
+            })
+            .then(id => {
+                const sid = (id || '').trim();
+                if (!sid) throw new Error('begin 未返回会话 id');
+                this._id = sid;
+            });
+        return this._queue;
+    }
+
+    /** 追加一块。串行排队，避免并发写同一文件造成乱序。 */
+    write(chunk) {
+        const data = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+        this._queue = this._queue.then(() => {
+            if (this._id === null) throw new Error('写入会话尚未开启');
+            return fetch(StreamingFileSink.BASE + '/write?id=' + encodeURIComponent(this._id), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/octet-stream' },
+                body: data
+            }).then(r => {
+                if (!r.ok) throw new Error('write 失败: ' + r.status);
+            });
+        });
+        return this._queue;
+    }
+
+    /** 收尾：由手机端校验字节数并移动到「下载」目录。 */
+    finish() {
+        this._queue = this._queue.then(() => {
+            if (this._id === null) throw new Error('写入会话尚未开启');
+            return fetch(StreamingFileSink.BASE + '/finish?id=' + encodeURIComponent(this._id), {
+                method: 'POST'
+            }).then(r => {
+                if (!r.ok) throw new Error('finish 失败: ' + r.status);
+            });
+        });
+        return this._queue;
+    }
+
+    /** 传输中断时丢弃残文件，避免在缓存目录留下与文件等大的临时文件。 */
+    abort() {
+        if (this._id === null) return;
+        const id = this._id;
+        this._id = null;
+        fetch(StreamingFileSink.BASE + '/abort?id=' + encodeURIComponent(id), { method: 'POST' })
+            .catch(() => { /* best effort */ });
+    }
+}

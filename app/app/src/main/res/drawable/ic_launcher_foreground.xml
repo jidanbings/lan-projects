@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Inset the full-bleed bubble logo so it fits the adaptive-icon safe zone.
+     22% inset on each side scales the bitmap down to ~56% of the 108dp canvas,
+     which stays well inside the mask (circle/squircle) and is not cropped. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:inset="22%">
+    <bitmap
+        android:src="@drawable/lan_projects_icon"
+        android:gravity="fill" />
+</inset>

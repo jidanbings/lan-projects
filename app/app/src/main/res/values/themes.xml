@@ -1,0 +1,25 @@
+<resources>
+    <style name="Theme.LanProjects" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="colorPrimary">#3367d6</item>
+        <item name="colorPrimaryDark">#2854b0</item>
+        <!-- Light gray everywhere, matching every page's own #ECEFF1 background
+             (settings / about / privacy / logs / speed test / launch / transfer
+             top bar). The system bars are transparent under edge-to-edge on
+             Android 15 (targetSdk 35), so this also avoids a dark flash before
+             each page's background draws. -->
+        <item name="android:windowBackground">#ECEFF1</item>
+        <item name="android:statusBarColor">#ECEFF1</item>
+        <item name="android:navigationBarColor">#ECEFF1</item>
+    </style>
+
+    <!-- Scanner theme: dark, black system bars. Hide zxing's default viewfinder
+         (mask + laser) - the WeChat-style frame is drawn by the custom
+         WeChatViewfinderView overlay instead. -->
+    <style name="ScanTheme" parent="zxing_CaptureTheme">
+        <item name="android:windowBackground">#000000</item>
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:navigationBarColor">#000000</item>
+        <item name="zxing_viewfinder_laser_visibility">false</item>
+        <item name="zxing_viewfinder_mask">#00000000</item>
+    </style>
+</resources>

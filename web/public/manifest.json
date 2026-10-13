@@ -1,0 +1,37 @@
+{
+    "name": "lan-projects",
+    "short_name": "lan-projects",
+    "icons": [
+        {
+            "src": "images/web.ico",
+            "sizes": "192x192",
+            "type": "image/x-icon"
+        },
+        {
+            "src": "images/web.ico",
+            "sizes": "512x512",
+            "type": "image/x-icon"
+        }
+    ],
+    "background_color": "#efefef",
+    "start_url": "./",
+    "display": "standalone",
+    "theme_color": "#3367d6",
+    "share_target": {
+        "action": "/",
+        "method":"POST",
+        "enctype": "multipart/form-data",
+        "params": {
+            "title": "title",
+            "text": "text",
+            "url": "url",
+            "files": [{
+                "name": "allfiles",
+                "accept": ["*/*"]
+            }]
+        }
+    },
+    "launch_handler": {
+        "client_mode": "focus-existing"
+    }
+}

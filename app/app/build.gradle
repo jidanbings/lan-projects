@@ -1,0 +1,186 @@
+plugins {
+    id 'com.android.application'
+}
+
+// ------------------------------------------------------------------
+//  Release signing.
+//  The release keystore and its passwords live in the git-ignored
+//  app/keystore.properties (NEVER committed). If that file is absent
+//  - e.g. a fresh clone without the developer's private keystore -
+//  release builds fall back to being unsigned so the project still
+//  compiles. Ship only properly-signed release APKs.
+// ------------------------------------------------------------------
+def keystorePropsFile = rootProject.file('keystore.properties')
+def keystoreProps = new Properties()
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+
+// Version lives in app/version.properties, bumped by build-apk.bat.
+def versionPropsFile = file('version.properties')
+def versionProps = new Properties()
+if (versionPropsFile.exists()) {
+    versionPropsFile.withInputStream { versionProps.load(it) }
+}
+
+android {
+    namespace 'io.lanprojects.phone'
+    compileSdk 35
+
+    // LaunchActivity's runtime signature check reads BuildConfig.DEBUG.
+    buildFeatures {
+        buildConfig true
+    }
+
+    defaultConfig {
+        applicationId "io.lanprojects.phone"
+        minSdk 28
+        targetSdk 35
+        versionCode versionProps.getProperty('versionCode', '1').toInteger()
+        versionName versionProps.getProperty('versionName', '1.0.0')
+
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++17"
+            }
+        }
+        // Matches the NDK era nodejs-mobile 18.x was built with (r23c).
+        ndkVersion "23.2.8568313"
+        ndk {
+            // 64-bit only: nearly every Android 9+ device is arm64. Dropping
+            // 32-bit (armeabi-v7a) removes a second libnode.so (~46 MB), at the
+            // cost of the rare low-end 32-bit Android 9 devices.
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    packagingOptions {
+        jniLibs {
+            // Compress libnode.so inside the APK (it is extracted at install
+            // time). Keeps the APK much smaller; trade-off is a little extra
+            // storage/install time on the device.
+            useLegacyPackaging true
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+
+    signingConfigs {
+        release {
+            if (keystorePropsFile.exists()) {
+                storeFile file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // Sign only when the private keystore is present (see above).
+            if (keystorePropsFile.exists()) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+// ------------------------------------------------------------------
+//  Frontend integrity manifest (zero-trust anchor).
+//
+//  build-apk.bat copies web/public -> src/main/assets/nodejs-project/public
+//  BEFORE this task runs. This task SHA-256-hashes every file under that
+//  public/ tree and writes integrity-manifest.json into build/generated,
+//  packaged into the APK as assets/nodejs-project/integrity-manifest.json.
+//  (No leading dot on the name: AGP's asset merger ignores dotfiles.)
+//  Because the APK is signature-verified at install time, the packaged
+//  manifest is an immutable trusted reference: NodeService re-verifies the
+//  on-disk extraction against it at startup and FAILS CLOSED on any
+//  mismatch, so a non-root virus on the host phone cannot swap in tampered
+//  crypto code for the clients it serves.
+// ------------------------------------------------------------------
+def integrityPublicDir = file('src/main/assets/nodejs-project/public')
+
+def sha256Hex = { File f ->
+    def md = java.security.MessageDigest.getInstance('SHA-256')
+    f.withInputStream { is ->
+        byte[] buf = new byte[64 * 1024]
+        int n
+        while ((n = is.read(buf)) != -1) md.update(buf, 0, n)
+    }
+    md.digest().encodeHex().toString()
+}
+
+tasks.register('generateIntegrityManifest') {
+    group = 'lan-projects'
+    description = 'Hashes the bundled frontend (nodejs-project/public) and writes the integrity manifest.'
+    // AGP fills this DirectoryProperty in with build/generated/assets/<taskName>;
+    // the task writes integrity-manifest.json under it, so the file is
+    // packaged into the APK as assets/nodejs-project/integrity-manifest.json.
+    ext.outputDir = objects.directoryProperty()
+    inputs.dir(integrityPublicDir)
+    outputs.dir(ext.outputDir)
+    doLast {
+        def dir = integrityPublicDir
+        if (!dir.isDirectory()) {
+            throw new GradleException(
+                    "Frontend assets not found at ${dir}. Run the web -> assets sync first (build-apk.bat).")
+        }
+        def files = []
+        dir.eachFileRecurse(groovy.io.FileType.FILES) { files.add(it) }
+        files.sort { a, b -> a.path.compareTo(b.path) }
+        def manifest = [
+                format      : 'lan-projects-frontend-integrity-v1',
+                publicFiles : files.collect { f ->
+                    def rel = dir.toPath().relativize(f.toPath()).toString().replace('\\', '/')
+                    [path: rel, sha256: sha256Hex(f)]
+                }
+        ]
+        def out = new File(ext.outputDir.get().asFile, 'nodejs-project/integrity-manifest.json')
+        out.parentFile.mkdirs()
+        out.text = new groovy.json.JsonBuilder(manifest).toPrettyString()
+        logger.lifecycle("Frontend integrity manifest: {} files hashed -> {}", files.size(), out)
+    }
+}
+
+// Pack the generated manifest into the APK's assets for every variant, with
+// the ordering AGP guarantees (generator runs before assets are merged).
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.sources.assets?.addGeneratedSourceDirectory(
+                tasks.named('generateIntegrityManifest'),
+                { it.outputDir })
+    }
+}
+
+// Transitive deps pull mixed kotlin-stdlib versions; unify them.
+configurations.configureEach {
+    resolutionStrategy {
+        force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22'
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    // QR code: scan (camera) + generate the launch screen's connect QR.
+    implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
+    // Render markdown (release notes, README) in the app.
+    implementation 'io.noties.markwon:core:4.6.2'
+    implementation 'io.noties.markwon:ext-tables:4.6.2'
+    implementation 'io.noties.markwon:ext-strikethrough:4.6.2'
+}

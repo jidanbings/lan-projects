@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Primary action button (host mode): the app's blue (#3367D6), rounded. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#3367D6" />
+    <corners android:radius="16dp" />
+</shape>
