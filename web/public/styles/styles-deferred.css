@@ -494,20 +494,35 @@ x-dialog:not([show]) x-paper {
     opacity: 0.85;
 }
 
-/* 点选配对：两台设备上的 6 位数字必须一致，字号与配对码一样醒目。 */
+/* 点选配对：数字位只在真的算出来后才出现，等待期显示转圈状态区。
+   上一版在等待期用 "··· ···" 占位，两台设备看起来都像"没有数字"，也看不出
+   卡在哪一步——所以这里把"等待"和"已算出数字"做成两种明显不同的呈现。 */
 .pair-click-peer {
     margin: 0 0 4px;
+    opacity: 0.85;
 }
 
 .pair-click-sas {
     letter-spacing: 10px;
     text-indent: 10px;
+    margin: 6px 0;
+}
+
+.pair-click-waiting {
+    margin: 10px 0 2px;
 }
 
 .pair-click-hint {
-    min-height: 1.2em;      /* 预留高度，避免提示出现时布局跳动 */
+    min-height: 2.4em;      /* 预留两行高度，避免文案切换时布局跳动 */
     opacity: 0.85;
     margin: 8px 0 0;
+    line-height: 1.3;
+}
+
+.pair-click-error {
+    margin: 8px 0 0;
+    font-weight: 600;
+    color: var(--danger-color, #c62828);
 }
 
 /* 设备卡片上的"配对"入口（只有未配对的局域网设备显示）。 */

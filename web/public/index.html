@@ -414,7 +414,9 @@
             </x-background>
         </form>
     </x-dialog>
-    <!-- Click-to-pair (LAN device list) Dialog: 双方核对同一个 6 位数字 -->
+    <!-- Click-to-pair (LAN device list) Dialog.
+         数字位只在**真的拿到 6 位数字**之后才出现；等待阶段显示状态区（转圈 + 文案），
+         不再用 "··· ···" 冒充数字——那会让人以为"没显示出数字"，也看不出卡在哪一步。 -->
     <x-dialog id="pair-click-dialog">
         <form action="#">
             <x-background class="full center text-center">
@@ -423,16 +425,20 @@
                         <h2 class="dialog-title" data-i18n-key="dialogs.click-pair-title" data-i18n-attrs="text"></h2>
                     </div>
                     <div class="row center p-2">
-                        <div class="column">
+                        <div class="column fw">
                             <p class="center text-center font-subheading pair-click-peer"></p>
-                            <h1 class="center key pair-click-sas" dir="ltr">000 000</h1>
-                            <p class="center text-center key-instructions" data-i18n-key="dialogs.click-pair-sas-instructions" data-i18n-attrs="text"></p>
-                            <p class="center text-center font-subheading pair-click-hint" aria-live="polite"></p>
+                            <h1 class="center key pair-click-sas" dir="ltr" hidden></h1>
+                            <div class="pair-status pair-click-waiting" hidden>
+                                <div class="pair-status-spinner" aria-hidden="true"></div>
+                            </div>
+                            <p class="center text-center key-instructions pair-click-hint" aria-live="polite"></p>
+                            <p class="center text-center font-subheading pair-click-error" aria-live="assertive" hidden></p>
                         </div>
                     </div>
                     <div class="btn-row row-reverse wrap">
-                        <button class="btn btn-rounded btn-grey" type="button" data-i18n-key="dialogs.click-pair-confirm" data-i18n-attrs="text" id="pair-click-confirm" disabled></button>
+                        <button class="btn btn-rounded btn-primary" type="button" id="pair-click-confirm" hidden></button>
                         <button class="btn btn-rounded btn-grey" type="button" data-i18n-key="dialogs.cancel" data-i18n-attrs="text" close></button>
+                        <button class="btn btn-rounded btn-grey" type="button" id="pair-click-fallback" data-i18n-key="dialogs.click-pair-use-code" data-i18n-attrs="text" hidden></button>
                     </div>
                 </x-paper>
             </x-background>

@@ -1777,21 +1777,43 @@ class PairDeviceDialog extends Dialog {
  * 的 ECDH 结果不同，屏上显示的 6 位数字就必然不同，人眼一比对即可发现。6 位数字
  * 本身不是密钥、也不参与密钥生成，所以不存在"6 位熵太低可暴力破解"的问题。
  */
+/**
+ * 点选配对对话框：在局域网设备列表里点一台设备直接配对，不必手抄 26 字符配对码。
+ *
+ * 流程（临时 X25519 协商 + 6 位数字人工核对，与蓝牙的 Numeric Comparison 同构）：
+ *   A 点「配对」→ 请求里带上 A 的临时公钥；
+ *   B 明确看到「『A』请求与本机配对」→ 点「接受配对」，回一个带 B 临时公钥的 accept；
+ *   双方各自算出同一个共享密钥，把它哈希的前 6 位显示出来，由两台设备前的人核对；
+ *   **任一方**点「数字一致」即完成配对（规范做法是"至少一方确认"，另一端收到确认包
+ *   后自动完成）；数字不一致则立即中止并提示疑似中间人。
+ *   配对密钥 S' 由双方各自从同一个共享密钥本地派生，**不经网络传输**。
+ *
+ * 与上一版的区别（上一版等待期用 "··· ···" 占位，两端看起来都像"没有数字"，
+ * 而且要求两端各点一次确认，摩擦翻倍）：
+ *   - 数字位只在真的算出来之后才出现；等待期显示转圈 + 明确指引；
+ *   - 明确告诉发起方"请对方在『设备名』上点接受"，而不是让它干等；
+ *   - 超时 / 被拒绝 / 对方版本过旧都给出可操作结果（重试、或改用二维码与配对码）。
+ */
 class PairClickDialog extends Dialog {
 
-    /** 等对方接受 / 等对方确认数字的超时。 */
-    static get RESPONSE_TIMEOUT_MS() { return 30000; }
+    /** 等对方接受、等对方确认的超时。 */
+    static get ACCEPT_TIMEOUT_MS() { return 30000; }
+    static get CONFIRM_TIMEOUT_MS() { return 30000; }
 
     constructor() {
         super('pair-click-dialog');
         this.$peerName = this.$el.querySelector('.pair-click-peer');
         this.$sas = this.$el.querySelector('.pair-click-sas');
+        this.$waiting = this.$el.querySelector('.pair-click-waiting');
         this.$hint = this.$el.querySelector('.pair-click-hint');
+        this.$error = this.$el.querySelector('.pair-click-error');
         this.$confirmBtn = this.$el.querySelector('#pair-click-confirm');
-        this.$closeBtn = this.$el.querySelector('[close]');
+        this.$fallbackBtn = this.$el.querySelector('#pair-click-fallback');
 
         this.$confirmBtn.addEventListener('click', _ => this._onConfirmClicked());
-        this.$closeBtn.addEventListener('click', _ => this._cancel());
+        this.$fallbackBtn.addEventListener('click', _ => this._onUsePairingCode());
+        // 关闭按钮除基类的 hide() 之外，还要把"拒绝"告诉对方
+        this.$el.querySelector('[close]').addEventListener('click', _ => this._cancel());
 
         Events.on('pair-click-start', e => this._startWith(e.detail.peerId));
         Events.on('pair-click', e => this._onMessage(e.detail));
@@ -1801,16 +1823,17 @@ class PairClickDialog extends Dialog {
     }
 
     _reset() {
-        this._phase = null;              // 'waiting-accept' | 'accept' | 'compare'
+        this._phase = null;          // 'awaiting-accept' | 'incoming' | 'compare' | 'failed'
         this._peerId = null;
         this._keyPair = null;
         this._peerPublicKey = null;
         this._shared = null;
         this._key = null;
         this._sas = null;
-        this._confirmedByUs = false;
-        this._confirmedByPeer = false;
-        this._finalized = false;
+        // 注意：不在这里清 _finalized。配对完成后 _reset() 也会被调用（收起弹窗），
+        // 若在这里清掉，对方迟到的"拒绝/确认"会被当成新事件处理——刚配对成功又弹出
+        // 一句"对方拒绝了配对"。开始新一场配对时才显式清（见 _startWith / _onRequest）。
+        this._errorKey = null;
         this._clearTimeout();
     }
 
@@ -1819,12 +1842,11 @@ class PairClickDialog extends Dialog {
         this._timeoutTimer = null;
     }
 
-    _startTimeout(key) {
+    _startTimeout(ms, errorKey) {
         this._clearTimeout();
         this._timeoutTimer = setTimeout(() => {
-            this.$hint.innerText = Localization.getTranslation(key);
-            this.$confirmBtn.setAttribute('disabled', true);
-        }, PairClickDialog.RESPONSE_TIMEOUT_MS);
+            this._fail(errorKey);
+        }, ms);
     }
 
     _onKeyDown(e) {
@@ -1832,29 +1854,111 @@ class PairClickDialog extends Dialog {
         if (e.code === 'Escape') setTimeout(() => this._cancel(), 50);
     }
 
-    /** 本端作为发起方：选中了列表里的某台设备。 */
+    // ---- 渲染 -----------------------------------------------------------------
+    // 状态机只改状态，界面更新全部集中在这里。上一版把 innerText 赋值散落在各个
+    // 分支里，结果"等待态"和"已算出数字态"在屏幕上长得几乎一样，用户根本分不清
+    // 现在卡在哪一步。
+
+    _toggle(el, show) {
+        if (!el) return;
+        if (show) el.removeAttribute('hidden');
+        else el.setAttribute('hidden', true);
+    }
+
+    /** 对方设备的可读名称（找不到卡片时给一个中性称呼）。 */
+    _peerLabel() {
+        const $peer = this._peerId ? $(this._peerId) : null;
+        const name = $peer && $peer.ui && $peer.ui._peer ? $peer.ui._peer.name : null;
+        if (!name) return Localization.getTranslation('dialogs.click-pair-unknown-device');
+        return name.deviceName ? `${name.displayName || ''}（${name.deviceName}）` : name.displayName;
+    }
+
+    /**
+     * 取文案。
+     *
+     * 只有文案里真的带 {{device}} 的 key 才把设备名传进去——`addDataToTranslation`
+     * 遇到"传了但文案里没有"的占位符会抛错，而 getTranslation 的兜底是返回空字符串，
+     * 于是整条提示变成空白（曾经就是这样：核对数字那一句在界面上是空的）。
+     */
+    _t(key) {
+        const withDevice = PairClickDialog.DEVICE_PLACEHOLDER_KEYS.includes(key);
+        return Localization.getTranslation(key, null, withDevice ? {device: this._peerLabel()} : {});
+    }
+
+    /** 文案里含 {{device}} 的 key 清单（新增带设备名的文案时记得一起加进来）。 */
+    static get DEVICE_PLACEHOLDER_KEYS() {
+        return [
+            'dialogs.click-pair-awaiting-accept',
+            'dialogs.click-pair-incoming',
+            'dialogs.click-pair-no-response',
+            'dialogs.click-pair-peer-busy',
+            'dialogs.click-pair-declined'
+        ];
+    }
+
+    _render() {
+        const phase = this._phase;
+
+        this.$peerName.innerText = this._peerId ? this._peerLabel() : '';
+        this._toggle(this.$peerName, !!this._peerId);
+
+        // 数字位：只有真的算出来才显示，绝不拿占位符冒充
+        const hasDigits = phase === 'compare' && !!this._sas;
+        this._toggle(this.$sas, hasDigits);
+        if (hasDigits) this.$sas.innerText = window.LanPairing.formatSas(this._sas);
+
+        // 等待状态区：请求已发出/收到请求，但还没拿到数字
+        const waiting = phase === 'awaiting-accept' || phase === 'incoming';
+        this._toggle(this.$waiting, waiting);
+
+        const hintKey = {
+            'awaiting-accept': 'dialogs.click-pair-awaiting-accept',
+            'incoming': 'dialogs.click-pair-incoming',
+            'compare': 'dialogs.click-pair-compare'
+        }[phase];
+        this._toggle(this.$hint, !!hintKey);
+        this.$hint.innerText = hintKey ? this._t(hintKey) : '';
+
+        this._toggle(this.$error, !!this._errorKey);
+        this.$error.innerText = this._errorKey ? this._t(this._errorKey) : '';
+
+        // 主按钮：接受（被点名方）/ 数字一致（核对阶段）
+        const actionKey = phase === 'incoming'
+            ? 'dialogs.click-pair-accept'
+            : (phase === 'compare' ? 'dialogs.click-pair-confirm' : null);
+        this._toggle(this.$confirmBtn, !!actionKey);
+        if (actionKey) this.$confirmBtn.innerText = this._t(actionKey);
+
+        // 兜底入口：只在等不到对方 / 失败时出现，正常流程不干扰
+        this._toggle(this.$fallbackBtn, !!this._errorKey);
+    }
+
+    // ---- 动作 -----------------------------------------------------------------
+
+    /** 本机作为发起方：用户在设备卡片上点了「配对」。 */
     _startWith(peerId) {
-        if (!peerId || this.isShown()) return;
-        // 同浏览器的另一个标签页不是一台独立设备，配对没有意义。
+        if (!peerId) return;
         if (BrowserTabsConnector.peerIsSameBrowser(peerId)) {
             Events.fire('notify-user', Localization.getTranslation("notifications.pairing-tabs-error"));
             return;
         }
+        // 已经有一场配对在进行：让当前这场继续，不要被重复点击打乱
+        if (this.isShown() && this._phase && this._phase !== 'failed') return;
+
         this._reset();
+        this._finalized = false;      // 新一场配对：清掉上一场的完成标记
         this._peerId = peerId;
-        this._phase = 'waiting-accept';
+        this._phase = 'awaiting-accept';
         this._keyPair = window.LanPairing.generateEphemeralKeyPair();
-        this._renderPeerName(peerId);
-        this.$sas.innerText = '··· ···';
-        this.$hint.innerText = Localization.getTranslation("dialogs.click-pair-waiting-accept");
-        this._setConfirmLabel("dialogs.click-pair-confirm", false);
         this.show();
-        this._startTimeout("dialogs.click-pair-no-response");
+        this._render();
+        this._startTimeout(PairClickDialog.ACCEPT_TIMEOUT_MS, 'dialogs.click-pair-no-response');
         Events.fire('pair-click-send', {
             peerId: peerId,
             payload: {
                 type: 'pair-click-request',
-                pk: window.LanPairing._toHex(this._keyPair.publicKey)
+                pk: window.LanPairing._toHex(this._keyPair.publicKey),
+                v: LAN_PROTOCOL_VERSION
             }
         });
     }
@@ -1873,7 +1977,7 @@ class PairClickDialog extends Dialog {
                 break;
             case 'pair-click-reject':
                 if (fromId !== this._peerId) return;
-                this._onRejected();
+                this._onRejected(message.reason);
                 break;
             case 'pair-click-confirm':
                 if (fromId !== this._peerId) return;
@@ -1882,84 +1986,55 @@ class PairClickDialog extends Dialog {
         }
     }
 
-    /** 别人点了"配对此设备"。 */
+    /** 本机被点名：对方请求与本机配对。 */
     _onRequest(peerId, publicKeyHex) {
         const peerPublicKey = window.LanPairing._fromHex(publicKeyHex, 32);
         if (!peerPublicKey) return;
-        // 同一台设备已经在和其他设备配对中：明确拒绝，避免两场配对互相干扰。
-        if (this.isShown() || this._peerId) {
+
+        // 本机正在和别的设备配对：明确回绝并说明原因，别让对方干等
+        if (this.isShown() && this._phase && this._phase !== 'failed') {
             Events.fire('pair-click-send', {
                 peerId: peerId,
-                payload: {type: 'pair-click-reject'}
+                payload: {type: 'pair-click-reject', reason: 'busy'}
             });
             return;
         }
 
         this._reset();
+        this._finalized = false;      // 新一场配对：清掉上一场的完成标记
         this._peerId = peerId;
         this._peerPublicKey = peerPublicKey;
-        this._phase = 'accept';
-        this._renderPeerName(peerId);
-        this.$sas.innerText = '··· ···';
-        this.$hint.innerText = Localization.getTranslation("dialogs.click-pair-request-hint");
-        this._setConfirmLabel("dialogs.click-pair-accept", true);
+        this._phase = 'incoming';
         this.show();
-        this._startTimeout("dialogs.click-pair-no-response");
+        this._render();
+        this._startTimeout(PairClickDialog.ACCEPT_TIMEOUT_MS, 'dialogs.click-pair-request-expired');
     }
 
     _onAccept(publicKeyHex) {
+        if (this._phase !== 'awaiting-accept') return;
         const peerPublicKey = window.LanPairing._fromHex(publicKeyHex, 32);
-        if (!peerPublicKey || this._phase !== 'waiting-accept') return;
+        if (!peerPublicKey) return;
         this._peerPublicKey = peerPublicKey;
         this._enterComparePhase();
     }
 
-    _onRejected() {
-        if (this._finalized) return;
-        this._clearTimeout();
-        Events.fire('notify-user', Localization.getTranslation("notifications.pairing-declined"));
-        this.hide();
-        this._reset();
-    }
-
-    /** 对方点了"数字一致，确认"：用握手密钥解开它，核对里面的 SAS 是否与我们相同。 */
-    _onPeerConfirm(message) {
-        if (!this._key || this._phase !== 'compare') return;
-        let inner;
-        try {
-            const frame = new Uint8Array(base64ToArrayBuffer(message.data));
-            const plain = window.Chacha.chacha20poly1305(this._key, frame.subarray(0, 12))
-                .decrypt(frame.subarray(12));
-            inner = JSON.parse(new TextDecoder().decode(plain));
-        } catch (e) {
-            // 解不开 = 对方并没有同一把密钥（中间人转接 / 数据被改），配对必须失败。
-            this._fail(Localization.getTranslation("notifications.pairing-verification-failed"));
-            return;
-        }
-        if (inner.sas !== this._sas) {
-            // 对方屏幕上显示的数字与我们不同 —— 典型的中间人特征。
-            this._fail(Localization.getTranslation("notifications.pairing-sas-mismatch"));
-            return;
-        }
-        this._confirmedByPeer = true;
-        this._maybeFinalize();
-    }
-
+    /** 双方公钥齐了：算出共享密钥与 6 位核对数字。 */
     _enterComparePhase() {
         this._shared = window.LanPairing.ecdh(this._keyPair.secretKey, this._peerPublicKey);
-        this._key = window.LanPairing.deriveClickPairKey(this._shared, this._keyPair.publicKey, this._peerPublicKey);
-        this._sas = window.LanPairing.deriveClickPairSas(this._shared, this._keyPair.publicKey, this._peerPublicKey);
+        this._key = window.LanPairing.deriveClickPairKey(
+            this._shared, this._keyPair.publicKey, this._peerPublicKey);
+        this._sas = window.LanPairing.deriveClickPairSas(
+            this._shared, this._keyPair.publicKey, this._peerPublicKey);
 
         this._phase = 'compare';
-        this.$sas.innerText = window.LanPairing.formatSas(this._sas);
-        this.$hint.innerText = Localization.getTranslation("dialogs.click-pair-compare-hint");
-        this._setConfirmLabel("dialogs.click-pair-confirm", true);
-        this._startTimeout("dialogs.click-pair-no-response");
+        this._errorKey = null;
+        this._render();
+        this._startTimeout(PairClickDialog.CONFIRM_TIMEOUT_MS, 'dialogs.click-pair-confirm-timeout');
     }
 
     _onConfirmClicked() {
-        if (this._phase === 'accept') {
-            // 接受：把自己的临时公钥回给对方。
+        if (this._phase === 'incoming') {
+            // 接受：把自己的临时公钥回给对方，随后进入数字核对
             this._keyPair = window.LanPairing.generateEphemeralKeyPair();
             Events.fire('pair-click-send', {
                 peerId: this._peerId,
@@ -1969,37 +2044,71 @@ class PairClickDialog extends Dialog {
                 }
             });
             this._enterComparePhase();
-            this.$hint.innerText = Localization.getTranslation("dialogs.click-pair-compare-hint");
             return;
         }
         if (this._phase === 'compare') {
-            if (!this._confirmedByUs) {
-                this._confirmedByUs = true;
-                // 确认包用握手密钥加密，内含本端显示的 SAS：对方据此既能验证
-                // "我们持有同一把密钥"，也能发现"两边屏幕上的数字不一样"。
-                const nonce = crypto.getRandomValues(new Uint8Array(12));
-                const plaintext = new TextEncoder().encode(JSON.stringify({sas: this._sas}));
-                const sealed = window.Chacha.chacha20poly1305(this._key, nonce).encrypt(plaintext);
-                const frame = new Uint8Array(12 + sealed.length);
-                frame.set(nonce);
-                frame.set(sealed, 12);
-                Events.fire('pair-click-send', {
-                    peerId: this._peerId,
-                    payload: {type: 'pair-click-confirm', data: arrayBufferToBase64(frame.buffer)}
-                });
-                this.$hint.innerText = Localization.getTranslation("dialogs.click-pair-confirmed-waiting-peer");
-                this.$confirmBtn.setAttribute('disabled', true);
-            }
-            this._maybeFinalize();
+            // 「至少一方确认即可」：本端点确认后立即完成配对，另一端收到确认包后
+            // 自行完成。两端同时点也不会出问题（各自按第一次到达的确认完成）。
+            this._sendConfirm();
+            this._finalize();
         }
     }
 
-    _maybeFinalize() {
-        if (this._finalized || !this._confirmedByUs || !this._confirmedByPeer) return;
+    _sendConfirm() {
+        const nonce = crypto.getRandomValues(new Uint8Array(12));
+        const plaintext = new TextEncoder().encode(JSON.stringify({sas: this._sas}));
+        const sealed = window.Chacha.chacha20poly1305(this._key, nonce).encrypt(plaintext);
+        const frame = new Uint8Array(12 + sealed.length);
+        frame.set(nonce);
+        frame.set(sealed, 12);
+        Events.fire('pair-click-send', {
+            peerId: this._peerId,
+            payload: {type: 'pair-click-confirm', data: arrayBufferToBase64(frame.buffer)}
+        });
+    }
+
+    /**
+     * 对方的确认包：用握手的临时密钥解开，并核对里面报告的 6 位数字。
+     * 解不开 = 对方并不持有同一把密钥（中间人转接 / 数据被改），必须失败。
+     */
+    _onPeerConfirm(message) {
+        if (!this._key || this._phase !== 'compare') return;
+
+        let inner;
+        try {
+            const frame = new Uint8Array(base64ToArrayBuffer(message.data));
+            const plain = window.Chacha.chacha20poly1305(this._key, frame.subarray(0, 12))
+                .decrypt(frame.subarray(12));
+            inner = JSON.parse(new TextDecoder().decode(plain));
+        } catch (e) {
+            this._fail('notifications.pairing-verification-failed');
+            return;
+        }
+        if (inner.sas !== this._sas) {
+            // 对方屏幕上显示的数字与我们不同 —— 典型的中间人特征
+            this._fail('notifications.pairing-sas-mismatch');
+            Events.fire('notify-user', {
+                message: Localization.getTranslation('notifications.pairing-sas-mismatch')
+            });
+            return;
+        }
+        // 对方已确认数字一致：本端无需再点一次
+        this._finalize();
+    }
+
+    _onRejected(reason) {
+        if (this._finalized) return;
+        this._fail(reason === 'busy'
+            ? 'dialogs.click-pair-peer-busy'
+            : 'dialogs.click-pair-declined');
+    }
+
+    /** 配对成功：双方各自本地派生 S'，写入已配对设备。 */
+    _finalize() {
+        if (this._finalized || !this._shared) return;
         this._finalized = true;
         this._clearTimeout();
 
-        // 配对密钥 S' 由双方各自的 ECDH 结果本地派生，两端算出的相同，不经网络传输。
         const secret = window.LanPairing.deriveClickPairSecret(
             this._shared, this._keyPair.publicKey, this._peerPublicKey);
         const roomId = window.LanPairing.deriveRoomId(secret);
@@ -2009,7 +2118,6 @@ class PairClickDialog extends Dialog {
         const displayName = $peer ? $peer.ui._peer.name.displayName : null;
         const deviceName = $peer ? $peer.ui._peer.name.deviceName : null;
 
-        const peerId = this._peerId;
         this.hide();
         this._reset();
 
@@ -2017,8 +2125,8 @@ class PairClickDialog extends Dialog {
             .addRoomSecret(roomId, secret, displayName, deviceName, 'click')
             .then(_ => {
                 Events.fire('notify-user', Localization.getTranslation("notifications.pairing-success"));
-                // 通知服务器把本端加入这个秘密房间：之后的会话密钥握手、每会话
-                // 临时密钥、文件传输都与扫码/手输配对的设备完全一致。
+                // 通知服务器把本端加入这个秘密房间：之后走与扫码/手输配对完全相同的
+                // 会话密钥握手、每会话临时密钥与文件传输链路。
                 Events.fire('room-secrets', [roomId]);
                 Events.fire('evaluate-number-room-secrets');
             })
@@ -2028,39 +2136,36 @@ class PairClickDialog extends Dialog {
             });
     }
 
-    _fail(message) {
+    /** 失败：把原因留在弹窗里（toast 会消失，弹窗能一直看着），并给出兜底入口。 */
+    _fail(errorKey) {
+        if (this._finalized) return;
         this._clearTimeout();
-        this.hide();
-        this._reset();
-        Events.fire('notify-user', {message: message});
+        this._phase = 'failed';
+        this._errorKey = errorKey;
+        this._render();
     }
 
-    _renderPeerName(peerId) {
-        const $peer = $(peerId);
-        const name = $peer ? $peer.ui._peer.name : null;
-        this.$peerName.innerText = name
-            ? `${name.displayName} （${name.deviceName}）`
-            : '';
+    /** 改用二维码 / 配对码配对（离网信道更强，双方不在同一屏前时用）。 */
+    _onUsePairingCode() {
+        this._cancel();
+        Events.fire('pair-device-initiate');
     }
 
-    _setConfirmLabel(translationKey, enabled) {
-        this.$confirmBtn.innerText = Localization.getTranslation(translationKey);
-        if (enabled) this.$confirmBtn.removeAttribute('disabled');
-        else this.$confirmBtn.setAttribute('disabled', true);
-    }
-
-    /** 关闭/取消：还没进入数字核对阶段时告诉对方一声，别让对方干等。 */
+    /**
+     * 关闭弹窗。若还没走到核对阶段，要告诉对方一声——否则发起方会一直停在
+     * "等待对方接受"上，直到自己超时。
+     */
     _cancel() {
         const peerId = this._peerId;
         const phase = this._phase;
-        const informed = this._finalized;
+        const finalized = this._finalized;
         this._clearTimeout();
         this.hide();
         this._reset();
-        if (peerId && !informed && (phase === 'accept' || phase === 'waiting-accept')) {
+        if (peerId && !finalized && (phase === 'incoming' || phase === 'awaiting-accept')) {
             Events.fire('pair-click-send', {
                 peerId: peerId,
-                payload: {type: 'pair-click-reject'}
+                payload: {type: 'pair-click-reject', reason: 'declined'}
             });
         }
     }

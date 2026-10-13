@@ -66,6 +66,13 @@ class LanProjects {
         // Load deferred assets
         console.log("Load deferred assets...");
         await this.loadDeferredAssets();
+        if (this.failedAssets && this.failedAssets.length) {
+            // 有脚本/样式没加载出来：继续 hydrate 只会在后面抛出更难懂的错
+            // （要用到的类根本没定义）。这里直接给结论与刷新入口。
+            console.error("Deferred assets failed to load:", this.failedAssets);
+            await this.showStartupFailure();
+            return;
+        }
         console.log("Loading of deferred assets completed.");
 
         console.log("Hydrate UI...");
@@ -75,6 +82,41 @@ class LanProjects {
         // Evaluate url params as soon as ws is connected
         console.log("Evaluate URL params as soon as websocket connection is established.");
         Events.on('ws-connected', _ => this.evaluateUrlParams(), {once: true});
+    }
+
+    /**
+     * 前端资源没加载全时的兜底呈现。
+     *
+     * 刻意不依赖 hydrate() 里创建的任何组件（它们可能正是因为脚本没加载出来而
+     * 缺失）：直接改 DOM + 一句能照着做的话。旧实现在这种情况下会静默停在
+     * "Loading..."，用户只能看到一个永远不动的转圈。
+     */
+    async showStartupFailure() {
+        try {
+            document.querySelectorAll('.opacity-0').forEach(el => el.classList.remove('opacity-0'));
+            const container = document.querySelector('.toast-container');
+            if (!container) return;
+            container.hidden = false;
+            const title = Localization.getTranslation('notifications.assets-load-failed-title');
+            const body = Localization.getTranslation('notifications.assets-load-failed', null, {
+                files: this.failedAssets.join(', ')
+            });
+            const reload = Localization.getTranslation('notifications.assets-reload');
+            const box = document.createElement('div');
+            box.className = 'startup-error';
+            box.setAttribute('role', 'alert');
+            box.innerHTML = `<strong></strong><p></p><button type="button"></button>`;
+            box.querySelector('strong').textContent = title;
+            box.querySelector('p').textContent = body;
+            const btn = box.querySelector('button');
+            btn.type = 'button';
+            btn.textContent = reload;
+            btn.addEventListener('click', _ => location.reload());
+            container.innerHTML = '';
+            container.appendChild(box);
+        } catch (e) {
+            console.error('Failed to render startup failure notice', e);
+        }
     }
 
     registerServiceWorker() {
@@ -114,6 +156,7 @@ class LanProjects {
     }
 
     loadDeferredAssets() {
+        this.failedAssets = [];
         const stylePromises = this.deferredStyles.map(url => this.loadAndApplyStylesheet(url));
         const scriptPromises = this.deferredScripts.map(url => this.loadAndApplyScript(url));
 
@@ -138,15 +181,14 @@ class LanProjects {
     }
 
     loadAndApplyStylesheet(url) {
-        return new Promise( async (resolve) => {
-            try {
-                await this.loadStyleSheet(url);
-                console.log(`Stylesheet loaded successfully: ${url}`);
-                resolve();
-            } catch (error) {
+        // 失败也必须 settle：旧实现在 catch 里从不 resolve，于是 Promise.all
+        // 永远不完成，整个应用就永久停在 "Loading..." 上（连一句提示都没有）。
+        return this.loadStyleSheet(url)
+            .then(_ => console.log(`Stylesheet loaded successfully: ${url}`))
+            .catch(error => {
                 console.error('Error loading stylesheet:', error);
-            }
-        });
+                this.failedAssets.push(url);
+            });
     }
 
     loadScript(url) {
@@ -161,15 +203,13 @@ class LanProjects {
     }
 
     loadAndApplyScript(url) {
-        return new Promise( async (resolve) => {
-            try {
-                await this.loadScript(url);
-                console.log(`Script loaded successfully: ${url}`);
-                resolve();
-            } catch (error) {
+        // 同上：失败要 settle 并被记录下来，由 initialize() 统一给出可操作的提示。
+        return this.loadScript(url)
+            .then(_ => console.log(`Script loaded successfully: ${url}`))
+            .catch(error => {
                 console.error('Error loading script:', error);
-            }
-        });
+                this.failedAssets.push(url);
+            });
     }
 
     async hydrate() {
